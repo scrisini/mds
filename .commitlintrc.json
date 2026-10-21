@@ -1,0 +1,21 @@
+{
+  "extends": ["@commitlint/config-conventional"],
+  "rules": {
+    "type-enum": [
+      2,
+      "always",
+      ["feat", "fix", "perf", "refactor", "revert", "docs", "test", "build", "ci", "chore", "style"]
+    ],
+    "scope-enum": [
+      1,
+      "always",
+      ["streaming", "prices", "candles", "decimal", "metrics", "persistence", "api", "config", "deps"]
+    ],
+    "scope-case": [2, "always", "kebab-case"],
+    "subject-case": [2, "never", ["sentence-case", "start-case", "pascal-case", "upper-case"]],
+    "subject-full-stop": [2, "never", "."],
+    "header-max-length": [2, "always", 100],
+    "body-max-line-length": [2, "always", 100],
+    "footer-max-line-length": [2, "always", 100]
+  }
+}
