@@ -11,11 +11,12 @@ server:
 mds:
   exchanges: ${MDS_EXCHANGES:binance,kraken,bitstamp,kucoin,bitfinex}
   pairs: ${MDS_PAIRS:BTC/USDT,ETH/USDT,BTC/USD,ETH/USD}
-  fetch-timeout: 5s
-  collector:
+  connection-timeout: 10s
+  reconnect-delay: 5s
+  stale-after: 60s
+  archive:
     enabled: true
-    initial-delay: 5s
-    interval: 30s
+    interval: ${MDS_ARCHIVE_INTERVAL:5s}
   influx:
     url: ${MDS_INFLUX_URL:http://localhost:8086}
     token: ${MDS_INFLUX_TOKEN:mds-dev-token}
@@ -34,5 +35,6 @@ management:
 logging:
   level:
     com.mds: INFO
-    # XChange logs every HTTP call at INFO
+    # XChange logs every HTTP call and WebSocket (re)subscription at INFO
     si.mazi.rescu: WARN
+    info.bitrich.xchangestream: WARN

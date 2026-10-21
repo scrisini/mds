@@ -25,21 +25,25 @@ dependencies {
     implementation("org.springframework.boot:spring-boot-starter-webmvc")
     implementation("org.springframework.boot:spring-boot-starter-actuator")
 
-    // Exchange connectivity
-    implementation("org.knowm.xchange:xchange-core:$xchangeVersion")
-    implementation("org.knowm.xchange:xchange-binance:$xchangeVersion")
-    implementation("org.knowm.xchange:xchange-kraken:$xchangeVersion")
-    implementation("org.knowm.xchange:xchange-bitstamp:$xchangeVersion")
-    implementation("org.knowm.xchange:xchange-kucoin:$xchangeVersion")
-    implementation("org.knowm.xchange:xchange-bitfinex:$xchangeVersion")
+    // Exchange connectivity (WebSocket streams; each pulls in its REST module for metadata)
+    implementation("org.knowm.xchange:xchange-stream-core:$xchangeVersion")
+    implementation("org.knowm.xchange:xchange-stream-binance:$xchangeVersion")
+    implementation("org.knowm.xchange:xchange-stream-kraken:$xchangeVersion")
+    implementation("org.knowm.xchange:xchange-stream-bitstamp:$xchangeVersion")
+    implementation("org.knowm.xchange:xchange-stream-kucoin:$xchangeVersion")
+    implementation("org.knowm.xchange:xchange-stream-bitfinex:$xchangeVersion")
 
     // Persistence
     implementation("com.influxdb:influxdb-client-java:$influxClientVersion")
 
+    compileOnly("org.projectlombok:lombok")
+    annotationProcessor("org.projectlombok:lombok")
     annotationProcessor("org.springframework.boot:spring-boot-configuration-processor")
 
     testImplementation("org.springframework.boot:spring-boot-starter-test")
     testImplementation("org.springframework.boot:spring-boot-starter-webmvc-test")
+    testCompileOnly("org.projectlombok:lombok")
+    testAnnotationProcessor("org.projectlombok:lombok")
     testRuntimeOnly("org.junit.platform:junit-platform-launcher")
 }
 

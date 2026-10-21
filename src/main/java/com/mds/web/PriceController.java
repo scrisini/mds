@@ -11,9 +11,9 @@ import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestMapping;
-import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 
+/** Live prices, computed on each request from the latest WebSocket updates. */
 @RestController
 @RequestMapping("/api/v1/prices")
 public class PriceController {
@@ -26,33 +26,28 @@ public class PriceController {
         this.repository = repository;
     }
 
-    /** Latest cached aggregate for every configured pair. */
+    /** Aggregate for every subscribed pair that has a fresh quote. */
     @GetMapping
     public List<AggregatedPrice> all() {
-        return priceService.latestForConfiguredPairs();
+        return priceService.aggregates();
     }
 
-    /**
-     * Aggregate for one pair, e.g. {@code /api/v1/prices/BTC-USDT}. Served from cache
-     * unless {@code live=true}; pairs not in the configured set are always fetched live.
-     */
+    /** Aggregate for one pair, e.g. {@code /api/v1/prices/BTC-USDT}. */
     @GetMapping("/{pair}")
-    public AggregatedPrice aggregate(@PathVariable String pair,
-                                     @RequestParam(defaultValue = "false") boolean live) {
-        MarketPair marketPair = MarketPair.parse(pair);
-        return live ? priceService.refresh(marketPair) : priceService.latest(marketPair);
+    public AggregatedPrice aggregate(@PathVariable String pair) {
+        return priceService.aggregate(MarketPair.parse(pair));
     }
 
-    /** Live ticker from a single exchange, e.g. {@code /api/v1/prices/BTC-USDT/kraken}. */
+    /** Latest streamed quote from one exchange, e.g. {@code /api/v1/prices/BTC-USDT/kraken}. */
     @GetMapping("/{pair}/{exchange}")
     public PriceQuote quote(@PathVariable String pair, @PathVariable String exchange) {
         return priceService.quote(exchange, MarketPair.parse(pair));
     }
 
-    /** Runs a collection cycle immediately and archives it. */
-    @PostMapping("/collect")
-    public List<AggregatedPrice> collect() {
-        List<AggregatedPrice> aggregates = priceService.refreshConfiguredPairs();
+    /** Archives a snapshot of the current aggregates immediately. */
+    @PostMapping("/archive")
+    public List<AggregatedPrice> archive() {
+        List<AggregatedPrice> aggregates = priceService.aggregates();
         repository.save(aggregates);
         return aggregates;
     }

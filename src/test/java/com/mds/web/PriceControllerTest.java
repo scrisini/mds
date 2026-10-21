@@ -14,6 +14,7 @@ import com.mds.model.AggregatedPrice;
 import com.mds.model.MarketPair;
 import com.mds.model.QuoteFailure;
 import com.mds.persistence.PriceRepository;
+import com.mds.service.PairNotSubscribedException;
 import com.mds.service.PriceService;
 import com.mds.service.PriceUnavailableException;
 import com.mds.service.UnknownExchangeException;
@@ -38,9 +39,9 @@ class PriceControllerTest {
     private PriceRepository repository;
 
     @Test
-    void returnsCachedAggregate() throws Exception {
+    void returnsLiveAggregate() throws Exception {
         BigDecimal price = new BigDecimal("67000.5");
-        when(priceService.latest(BTC_USDT)).thenReturn(new AggregatedPrice("BTC/USDT",
+        when(priceService.aggregate(BTC_USDT)).thenReturn(new AggregatedPrice("BTC/USDT",
                 Instant.parse("2026-10-21T12:00:00Z"), 1, price, price, null, price, price,
                 null, null, null, null, List.of(), List.of()));
 
@@ -58,6 +59,15 @@ class PriceControllerTest {
     }
 
     @Test
+    void unsubscribedPairIsNotFound() throws Exception {
+        MarketPair doge = MarketPair.parse("DOGE-USDT");
+        when(priceService.aggregate(doge)).thenThrow(new PairNotSubscribedException(doge, List.of(BTC_USDT)));
+
+        mvc.perform(get("/api/v1/prices/DOGE-USDT"))
+                .andExpect(status().isNotFound());
+    }
+
+    @Test
     void unknownExchangeIsNotFound() throws Exception {
         when(priceService.quote("nope", BTC_USDT)).thenThrow(new UnknownExchangeException("nope"));
 
@@ -67,7 +77,7 @@ class PriceControllerTest {
 
     @Test
     void unavailablePriceListsFailures() throws Exception {
-        when(priceService.latest(BTC_USDT)).thenThrow(
+        when(priceService.aggregate(BTC_USDT)).thenThrow(
                 new PriceUnavailableException(BTC_USDT, List.of(new QuoteFailure("kraken", "timed out"))));
 
         mvc.perform(get("/api/v1/prices/BTC-USDT"))
