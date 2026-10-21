@@ -11,11 +11,26 @@ server:
 mds:
   exchanges: ${MDS_EXCHANGES:binance,kraken,bitstamp,kucoin,bitfinex}
   pairs: ${MDS_PAIRS:BTC/USDT,ETH/USDT,BTC/USD,ETH/USD}
-  fetch-timeout: 5s
-  collector:
+  connection-timeout: 10s
+  reconnect-delay: 5s
+  stale-after: 60s
+  archive:
     enabled: true
-    initial-delay: 5s
-    interval: 30s
+    interval: ${MDS_ARCHIVE_INTERVAL:5s}
+  stream:
+    default-throttle: 1s
+    min-throttle: 100ms
+    max-throttle: 60s
+    timeout: 30m
+    max-subscribers: 1000
+  ohlc:
+    # midnight in this zone starts each day/week (Monday)/month/year candle
+    zone: ${MDS_OHLC_ZONE:UTC}
+    flush-interval: 10s
+  # Precision of every price and volume; fixed at startup. Range is ±Long.MAX_VALUE / 10^scale.
+  decimal:
+    scale: ${MDS_DECIMAL_SCALE:8}
+    rounding: ${MDS_DECIMAL_ROUNDING:HALF_EVEN}
   influx:
     url: ${MDS_INFLUX_URL:http://localhost:8086}
     token: ${MDS_INFLUX_TOKEN:mds-dev-token}
@@ -30,9 +45,18 @@ management:
   endpoint:
     health:
       show-details: always
+  metrics:
+    tags:
+      application: mds
+    distribution:
+      # REST API calls are timed by Spring as http.server.requests (tags: method, uri, status, outcome)
+      percentiles:
+        http.server.requests: 0.5,0.95,0.99
+        mds.influx: 0.5,0.95,0.99
 
 logging:
   level:
     com.mds: INFO
-    # XChange logs every HTTP call at INFO
+    # XChange logs every HTTP call and WebSocket (re)subscription at INFO
     si.mazi.rescu: WARN
+    info.bitrich.xchangestream: WARN

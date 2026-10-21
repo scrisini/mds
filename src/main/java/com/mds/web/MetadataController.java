@@ -1,9 +1,9 @@
 package com.mds.web;
 
 import java.util.List;
-import java.util.Set;
 
-import com.mds.exchange.ExchangeRegistry;
+import com.mds.exchange.MarketStreamManager;
+import com.mds.model.ExchangeStatus;
 import com.mds.model.MarketPair;
 import com.mds.service.PriceService;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -14,23 +14,23 @@ import org.springframework.web.bind.annotation.RestController;
 @RequestMapping("/api/v1")
 public class MetadataController {
 
-    private final ExchangeRegistry registry;
+    private final MarketStreamManager streams;
     private final PriceService priceService;
 
-    public MetadataController(ExchangeRegistry registry, PriceService priceService) {
-        this.registry = registry;
+    public MetadataController(MarketStreamManager streams, PriceService priceService) {
+        this.streams = streams;
         this.priceService = priceService;
     }
 
-    /** Exchanges that initialised successfully. */
+    /** Connection state, subscribed pairs and last update time per exchange. */
     @GetMapping("/exchanges")
-    public Set<String> exchanges() {
-        return registry.ids();
+    public List<ExchangeStatus> exchanges() {
+        return streams.status();
     }
 
-    /** Pairs collected and archived on every cycle. */
+    /** Pairs subscribed on every exchange that lists them. */
     @GetMapping("/pairs")
     public List<String> pairs() {
-        return priceService.configuredPairs().stream().map(MarketPair::symbol).toList();
+        return priceService.pairs().stream().map(MarketPair::symbol).toList();
     }
 }

@@ -7,13 +7,14 @@ import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
 @Configuration(proxyBeanMethods = false)
-public class ExecutorConfig {
+public class StreamConfig {
 
     /**
-     * Ticker requests are blocking HTTP calls, so each one gets its own virtual thread.
+     * Writes to SSE clients are blocking socket I/O; virtual threads keep a slow client from
+     * holding a platform thread.
      */
     @Bean(destroyMethod = "close")
-    public ExecutorService quoteFetchExecutor() {
+    public ExecutorService streamExecutor() {
         return Executors.newVirtualThreadPerTaskExecutor();
     }
 }

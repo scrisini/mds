@@ -1,8 +1,9 @@
 package com.mds.model;
 
-import java.math.BigDecimal;
 import java.time.Instant;
 import java.util.List;
+
+import com.mds.math.Decimal;
 
 /**
  * Cross-exchange view of one pair at a point in time.
@@ -16,14 +17,14 @@ public record AggregatedPrice(
         String pair,
         Instant timestamp,
         int sources,
-        BigDecimal mean,
-        BigDecimal median,
-        BigDecimal vwap,
-        BigDecimal min,
-        BigDecimal max,
-        BigDecimal bestBid,
+        Decimal mean,
+        Decimal median,
+        Decimal vwap,
+        Decimal min,
+        Decimal max,
+        Decimal bestBid,
         String bestBidExchange,
-        BigDecimal bestAsk,
+        Decimal bestAsk,
         String bestAskExchange,
         List<PriceQuote> quotes,
         List<QuoteFailure> failures) {
