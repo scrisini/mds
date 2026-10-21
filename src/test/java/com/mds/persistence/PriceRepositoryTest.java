@@ -116,6 +116,18 @@ class PriceRepositoryTest {
                 .contains("limit(n: 52)");
     }
 
+    @Test
+    void recoveryQueryTakesLatestCandleOfEachSeries() {
+        repository.findLatestCandles(FROM);
+
+        ArgumentCaptor<String> flux = ArgumentCaptor.forClass(String.class);
+        verify(queryApi).query(flux.capture());
+        assertThat(flux.getValue())
+                .contains("group(columns: [\"pair\", \"source\", \"period\"])")
+                .contains("tail(n: 1)")
+                .doesNotContain("complete == false");
+    }
+
     @SuppressWarnings("unchecked")
     private static ArgumentCaptor<List<Point>> pointsCaptor() {
         return ArgumentCaptor.forClass(List.class);

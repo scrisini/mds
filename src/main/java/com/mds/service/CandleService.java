@@ -6,10 +6,14 @@ import java.time.ZoneId;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.Queue;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedQueue;
+
+import static java.util.stream.Collectors.toSet;
 
 import com.mds.config.MdsProperties;
 import com.mds.math.Decimal;
@@ -40,10 +44,18 @@ import org.springframework.stereotype.Service;
  *   <li>an extra flush runs at local midnight in {@code mds.ohlc.zone}, the boundary every period
  *       shares, so completed candles land within a second of the period end;</li>
  *   <li>a completed candle whose write fails stays queued and is retried on the next flush;</li>
- *   <li>on startup incomplete candles are reloaded from InfluxDB: those for the current period
- *       continue (keeping their open, high and low), those whose period ended while the service
- *       was down are written as complete; on shutdown a final flush runs.</li>
+ *   <li>on startup the latest candle of every series is reloaded from InfluxDB: one for the
+ *       current period continues (keeping its open, high and low), and any periods missed while the
+ *       service was down are filled in (see below); on shutdown a final flush runs.</li>
  * </ul>
+ *
+ * <p>Continuity: every period gets a candle, so charts have no holes. When a period ends, the next
+ * period's candle is seeded straight away as a flat placeholder at the last close
+ * ({@code open = high = low = close}, {@code updates = 0}). The first real price in that period
+ * replaces the placeholder, so open is still the first traded price; if none arrives the
+ * placeholder is what's stored. Periods missed during downtime are back-filled the same way from
+ * the last stored close. Only active sources are carried forward: the index and exchanges listed
+ * in {@code mds.exchanges}, for pairs in {@code mds.pairs}.
  */
 @Slf4j
 @Service
@@ -59,6 +71,8 @@ public class CandleService implements SmartLifecycle {
     private final PriceRepository repository;
     private final ZoneId zone;
     private final Clock clock;
+    private final Set<String> exchanges;
+    private final Set<MarketPair> pairs;
     private final Map<Key, Candle> open = new ConcurrentHashMap<>();
     private final Queue<Candle> completed = new ConcurrentLinkedQueue<>();
     private volatile Disposable subscription;
@@ -70,6 +84,8 @@ public class CandleService implements SmartLifecycle {
         this.repository = repository;
         this.zone = properties.ohlc().zone();
         this.clock = clock;
+        this.exchanges = properties.exchanges().stream().map(e -> e.toLowerCase(Locale.ROOT)).collect(toSet());
+        this.pairs = properties.pairs().stream().map(MarketPair::parse).collect(toSet());
     }
 
     // ---- lifecycle ----
@@ -119,17 +135,37 @@ public class CandleService implements SmartLifecycle {
     private void applyAll(String source, MarketPair pair, Decimal price, Instant at) {
         for (CandlePeriod period : CandlePeriod.values()) {
             open.compute(new Key(source, pair, period), (key, current) -> {
-                if (current != null && !at.isBefore(period.end(current.start(), zone))) {
-                    completed.add(current.completed());
-                    current = null;
-                }
                 if (current == null) {
                     return Candle.open(pair.toString(), source, period, period.start(at, zone), price);
                 }
+                Candle rolled = rollForward(current, at, true);
                 // an update stamped before the current period (clock skew) is ignored
-                return at.isBefore(current.start()) ? current : current.with(price);
+                return at.isBefore(rolled.start()) ? rolled : rolled.with(price);
             });
         }
+    }
+
+    /**
+     * Completes {@code candle} and every following period that has ended by {@code now}, filling
+     * each skipped period with a flat candle at the last close. Returns the candle for the period
+     * containing {@code now}, or null once the series ends because its source is no longer active.
+     */
+    private Candle rollForward(Candle candle, Instant now, boolean active) {
+        Candle current = candle;
+        Instant end = current.period().end(current.start(), zone);
+        while (!now.isBefore(end)) {
+            completed.add(current.completed());
+            if (!active) {
+                return null;
+            }
+            current = current.carriedForward(end);
+            end = current.period().end(end, zone);
+        }
+        return current;
+    }
+
+    private boolean isActive(Key key) {
+        return pairs.contains(key.pair()) && (key.source().equals(INDEX) || exchanges.contains(key.source()));
     }
 
     // ---- persistence ----
@@ -149,13 +185,7 @@ public class CandleService implements SmartLifecycle {
     synchronized void flush() {
         Instant now = clock.instant();
         for (Key key : open.keySet()) {
-            open.computeIfPresent(key, (k, candle) -> {
-                if (now.isBefore(k.period().end(candle.start(), zone))) {
-                    return candle;
-                }
-                completed.add(candle.completed());
-                return null;
-            });
+            open.computeIfPresent(key, (k, candle) -> rollForward(candle, now, isActive(k)));
         }
 
         List<Candle> finished = new ArrayList<>();
@@ -175,28 +205,41 @@ public class CandleService implements SmartLifecycle {
         }
     }
 
-    /** Reloads incomplete candles, continuing the current periods and finalising past ones. */
+    /**
+     * Reloads the latest stored candle of every series and rolls it forward to now: a candle for
+     * the current period continues, ended ones are completed, and periods missed while the service
+     * was down are filled with flat candles at the last close.
+     */
     private void recover() {
         Instant now = clock.instant();
         Instant since = CandlePeriod.YEAR.start(now, zone).atZone(zone).minusYears(1).toInstant();
         List<Candle> stored;
         try {
-            stored = repository.findIncompleteCandles(since);
+            stored = repository.findLatestCandles(since);
         } catch (RuntimeException e) {
             log.warn("Could not reload candles from InfluxDB, starting fresh: {}", e.getMessage());
             return;
         }
         int resumed = 0;
+        int before = completed.size();
         for (Candle candle : stored) {
-            if (candle.start().equals(candle.period().start(now, zone))) {
-                open.put(new Key(candle.source(), MarketPair.parse(candle.pair()), candle.period()), candle);
-                resumed++;
+            Key key = new Key(candle.source(), MarketPair.parse(candle.pair()), candle.period());
+            boolean active = isActive(key);
+            Candle current;
+            if (candle.complete()) {
+                // already final; resume from the period after it
+                current = active ? rollForward(candle.carriedForward(candle.period().end(candle.start(), zone)), now,
+                        true) : null;
             } else {
-                completed.add(candle.completed());
+                current = rollForward(candle, now, active);
+            }
+            if (current != null) {
+                open.put(key, current);
+                resumed++;
             }
         }
-        log.info("Recovered {} in-progress candles; {} from ended periods will be completed",
-                resumed, stored.size() - resumed);
+        log.info("Recovered {} candle series; {} candles to complete or back-fill", resumed,
+                completed.size() - before);
     }
 
     // ---- queries ----

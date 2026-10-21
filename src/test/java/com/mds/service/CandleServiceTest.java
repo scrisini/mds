@@ -54,7 +54,7 @@ class CandleServiceTest {
         when(streams.exchangesFor(BTC_USD)).thenReturn(List.of("bitstamp", "kraken"));
         PriceService prices = new PriceService(streams, book, new PriceAggregator(), properties, clock);
         service = new CandleService(book, prices, repository, properties, clock);
-        when(repository.findIncompleteCandles(any())).thenReturn(List.of());
+        when(repository.findLatestCandles(any())).thenReturn(List.of());
         org.mockito.Mockito.doAnswer(inv -> written.add(List.copyOf(inv.getArgument(0))))
                 .when(repository).saveCandles(anyList());
     }
@@ -111,18 +111,66 @@ class CandleServiceTest {
     }
 
     @Test
-    void flushClosesEndedPeriodsEvenWithoutNewUpdates() {
+    void endedPeriodWithoutUpdatesIsClosedAndNextOneSeededAtLastClose() {
         service.start();
         trade("kraken", "100");
+        trade("kraken", "104");
         clock.set(Instant.parse("2026-10-22T00:00:00Z"));
 
         service.flush();
 
-        assertThat(lastBatch()).filteredOn(c -> c.period() == CandlePeriod.DAY)
+        assertThat(lastBatch()).filteredOn(c -> c.period() == CandlePeriod.DAY && c.start().equals(TODAY))
                 .allSatisfy(c -> assertThat(c.complete()).isTrue())
                 .hasSize(2); // kraken + index
-        assertThat(service.current(BTC_USD, "kraken")).extracting(Candle::period)
-                .containsExactly(CandlePeriod.WEEK, CandlePeriod.MONTH, CandlePeriod.YEAR);
+        Candle tomorrow = current("kraken", CandlePeriod.DAY);
+        assertThat(tomorrow.start()).isEqualTo(Instant.parse("2026-10-22T00:00:00Z"));
+        assertFlat(tomorrow, "104");
+        assertThat(lastBatch()).contains(tomorrow);
+    }
+
+    @Test
+    void firstRealPriceReplacesTheCarriedForwardPlaceholder() {
+        service.start();
+        trade("kraken", "100");
+        clock.set(Instant.parse("2026-10-22T00:00:00Z"));
+        service.flush();
+
+        clock.set(Instant.parse("2026-10-22T08:00:00Z"));
+        trade("kraken", "90");
+        trade("kraken", "93");
+
+        Candle day = current("kraken", CandlePeriod.DAY);
+        assertThat(List.of(day.open(), day.high(), day.low(), day.close()))
+                .containsExactly(d("90"), d("93"), d("90"), d("93"));
+        assertThat(day.updates()).isEqualTo(2);
+    }
+
+    @Test
+    void fillsEveryPeriodWithoutUpdatesUntilPricesResume() {
+        service.start();
+        trade("kraken", "100");
+        for (int day = 22; day <= 24; day++) {
+            clock.set(Instant.parse("2026-10-%dT00:00:05Z".formatted(day)));
+            service.flush();
+        }
+
+        List<Candle> days = written.stream().flatMap(List::stream)
+                .filter(c -> c.source().equals("kraken") && c.period() == CandlePeriod.DAY && c.complete())
+                .distinct().toList();
+        assertThat(days).extracting(Candle::start).containsExactly(
+                TODAY, Instant.parse("2026-10-22T00:00:00Z"), Instant.parse("2026-10-23T00:00:00Z"));
+        days.subList(1, 3).forEach(c -> assertFlat(c, "100"));
+    }
+
+    @Test
+    void indexIsCarriedForwardWhenNoExchangeHasAFreshPrice() {
+        service.start();
+        trade("kraken", "100");
+        // a quiet day: the kraken quote goes stale, so there is no index price either
+        clock.set(Instant.parse("2026-10-22T00:00:05Z"));
+        service.flush();
+
+        assertFlat(current(CandleService.INDEX, CandlePeriod.DAY), "100");
     }
 
     @Test
@@ -150,7 +198,7 @@ class CandleServiceTest {
                 d("90"), d("99"), d("80"), d("95"), 50, false);
         Candle thisMonth = new Candle("BTC/USD", "kraken", CandlePeriod.MONTH,
                 Instant.parse("2026-10-01T00:00:00Z"), d("70"), d("130"), d("60"), d("95"), 900, false);
-        when(repository.findIncompleteCandles(any())).thenReturn(List.of(yesterday, thisMonth));
+        when(repository.findLatestCandles(any())).thenReturn(List.of(yesterday, thisMonth));
 
         service.start();
         trade("kraken", "140");
@@ -165,6 +213,59 @@ class CandleServiceTest {
     }
 
     @Test
+    void backFillsPeriodsMissedWhileDown() {
+        // last seen three days ago, before the service went down
+        Candle lastSeen = new Candle("BTC/USD", "kraken", CandlePeriod.DAY, Instant.parse("2026-10-18T00:00:00Z"),
+                d("90"), d("99"), d("80"), d("95"), 50, false);
+        when(repository.findLatestCandles(any())).thenReturn(List.of(lastSeen));
+
+        service.start();
+        service.flush();
+
+        List<Candle> kraken = lastBatch().stream()
+                .filter(c -> c.source().equals("kraken") && c.period() == CandlePeriod.DAY).toList();
+        assertThat(kraken).extracting(Candle::start).containsExactly(
+                Instant.parse("2026-10-18T00:00:00Z"), Instant.parse("2026-10-19T00:00:00Z"),
+                Instant.parse("2026-10-20T00:00:00Z"), TODAY);
+        assertThat(kraken.getFirst()).isEqualTo(lastSeen.completed());
+        assertThat(kraken.subList(1, 3)).allSatisfy(c -> {
+            assertFlat(c, "95");
+            assertThat(c.complete()).isTrue();
+        });
+        assertFlat(kraken.getLast(), "95");
+        assertThat(kraken.getLast().complete()).isFalse();
+    }
+
+    @Test
+    void resumesAfterACompletedCandleWhenTheNextWasNeverWritten() {
+        // e.g. the process died between closing yesterday and the next flush
+        Candle yesterday = new Candle("BTC/USD", "kraken", CandlePeriod.DAY, TODAY.minus(Duration.ofDays(1)),
+                d("90"), d("99"), d("80"), d("95"), 50, true);
+        when(repository.findLatestCandles(any())).thenReturn(List.of(yesterday));
+
+        service.start();
+        service.flush();
+
+        assertThat(lastBatch()).doesNotContain(yesterday);
+        Candle today = current("kraken", CandlePeriod.DAY);
+        assertThat(today.start()).isEqualTo(TODAY);
+        assertFlat(today, "95");
+    }
+
+    @Test
+    void stopsCarryingForwardSourcesNoLongerConfigured() {
+        Candle removedExchange = new Candle("BTC/USD", "gemini", CandlePeriod.DAY, TODAY.minus(Duration.ofDays(2)),
+                d("90"), d("99"), d("80"), d("95"), 50, false);
+        when(repository.findLatestCandles(any())).thenReturn(List.of(removedExchange));
+
+        service.start();
+        service.flush();
+
+        assertThat(lastBatch()).filteredOn(c -> c.source().equals("gemini")).containsExactly(removedExchange.completed());
+        assertThat(service.current(BTC_USD, "gemini")).isEmpty();
+    }
+
+    @Test
     void finalFlushOnStop() {
         service.start();
         trade("kraken", "100");
@@ -172,6 +273,13 @@ class CandleServiceTest {
         service.stop();
 
         assertThat(lastBatch()).extracting(Candle::source).contains("kraken", CandleService.INDEX);
+    }
+
+    private static void assertFlat(Candle candle, String price) {
+        assertThat(List.of(candle.open(), candle.high(), candle.low(), candle.close()))
+                .as("flat candle at %s", price)
+                .containsOnly(d(price));
+        assertThat(candle.updates()).isZero();
     }
 
     private void trade(String exchange, String price) {

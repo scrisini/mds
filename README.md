@@ -124,13 +124,23 @@ Keeping them timely:
 - an extra flush at midnight in `mds.ohlc.zone` (the boundary every period shares) closes the
   ended candles within a second of the period end;
 - a completed candle that fails to write is retried on each flush until it succeeds;
-- on startup, incomplete candles are reloaded from InfluxDB: the current period's continue with
-  their open, high and low intact, and any whose period ended while the service was down are
-  completed. A final flush runs on shutdown.
+- on startup the latest candle of every series is reloaded from InfluxDB: the current period's
+  continues with its open, high and low intact, and periods missed while the service was down are
+  back-filled (below). A final flush runs on shutdown.
 
-A new period's candle opens at the first price after the boundary. Updates during downtime are
-lost, so a candle spanning an outage reflects only the prices seen while running. Run one instance
-per InfluxDB bucket: two instances would overwrite each other's candles.
+**Continuity.** Every period gets a candle, so charts have no holes. When a period ends, the next
+period's candle is created immediately as a flat placeholder at the last close
+(`open = high = low = close`, `updates = 0`). If a real price arrives in that period it replaces
+the placeholder, so `open` is still the first traded price; if none does, the flat candle is what's
+stored. Periods missed during downtime are filled the same way from the last stored close, so a
+three-day outage leaves three flat daily candles rather than a gap. `updates = 0` identifies a
+carried-forward candle. Only active sources are carried forward: the index and exchanges in
+`mds.exchanges`, for pairs in `mds.pairs`; a removed exchange's last candle is completed and its
+series stops.
+
+Prices during downtime aren't recovered, so a candle spanning an outage reflects only what was
+seen while running. Run one instance per InfluxDB bucket: two instances would overwrite each
+other's candles.
 
 ```bash
 curl 'localhost:8080/api/v1/candles/BTC-USDT?period=week'
@@ -182,7 +192,7 @@ For SSE requests `http.server.requests` measures the whole connection.
 |---|---|---|
 | `ticker` | `exchange`, `pair` | `last`, `bid`, `ask`, `high`, `low`, `volume`, `quote_volume` |
 | `aggregate` | `pair` | `mean`, `median`, `vwap`, `min`, `max`, `best_bid`, `best_ask`, `sources` |
-| `ohlc` | `pair`, `source`, `period` | `open`, `high`, `low`, `close`, `updates`, `complete` |
+| `ohlc` | `pair`, `source`, `period` | `open`, `high`, `low`, `close`, `updates` (0 = carried forward), `complete` |
 
 Snapshots are taken every `mds.archive.interval`. Ticker points carry the time their last update
 was received, so an exchange that hasn't changed between snapshots overwrites its previous point

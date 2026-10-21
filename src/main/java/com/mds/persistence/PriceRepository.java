@@ -114,14 +114,16 @@ public class PriceRepository {
         return records(OHLC, flux).stream().map(PriceRepository::toCandle).toList();
     }
 
-    /** Every candle not yet marked complete whose period started at or after {@code since}. */
-    public List<Candle> findIncompleteCandles(Instant since) {
+    /** The most recent candle of every pair, source and period whose period started since {@code since}. */
+    public List<Candle> findLatestCandles(Instant since) {
         String flux = """
                 from(bucket: "%s")
                   |> range(start: %s)
                   |> filter(fn: (r) => r._measurement == "%s")
                   |> pivot(rowKey: ["_time"], columnKey: ["_field"], valueColumn: "_value")
-                  |> filter(fn: (r) => r.complete == false)
+                  |> group(columns: ["pair", "source", "period"])
+                  |> sort(columns: ["_time"])
+                  |> tail(n: 1)
                   |> group()
                 """.formatted(escape(bucket), since, OHLC);
         return records(OHLC, flux).stream().map(PriceRepository::toCandle).toList();
