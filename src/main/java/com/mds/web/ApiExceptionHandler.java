@@ -3,6 +3,7 @@ package com.mds.web;
 import com.influxdb.exceptions.InfluxException;
 import com.mds.service.PairNotSubscribedException;
 import com.mds.service.PriceUnavailableException;
+import com.mds.service.StreamCapacityException;
 import com.mds.service.UnknownExchangeException;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.HttpStatus;
@@ -30,6 +31,11 @@ public class ApiExceptionHandler {
         ProblemDetail problem = ProblemDetail.forStatusAndDetail(HttpStatus.SERVICE_UNAVAILABLE, e.getMessage());
         problem.setProperty("failures", e.failures());
         return problem;
+    }
+
+    @ExceptionHandler(StreamCapacityException.class)
+    ProblemDetail streamCapacity(StreamCapacityException e) {
+        return ProblemDetail.forStatusAndDetail(HttpStatus.SERVICE_UNAVAILABLE, e.getMessage());
     }
 
     @ExceptionHandler(InfluxException.class)

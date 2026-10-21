@@ -9,11 +9,13 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import java.math.BigDecimal;
+import java.math.RoundingMode;
 import java.time.Clock;
 import java.time.Duration;
 import java.util.List;
 
 import com.mds.config.MdsProperties;
+import com.mds.math.Decimal;
 import com.mds.model.MarketPair;
 import com.mds.service.QuoteBook;
 import info.bitrich.xchangestream.core.ProductSubscription;
@@ -45,7 +47,10 @@ class MarketStreamManagerTest {
     void setUp() {
         MdsProperties properties = new MdsProperties(List.of(), List.of("BTC/USD"),
                 Duration.ofSeconds(10), Duration.ofMillis(20), Duration.ofSeconds(60),
-                new MdsProperties.Archive(false, Duration.ofSeconds(5)));
+                new MdsProperties.Archive(false, Duration.ofSeconds(5)),
+                new MdsProperties.Stream(Duration.ofSeconds(1), Duration.ofMillis(100), Duration.ofSeconds(60),
+                        Duration.ofMinutes(30), 2),
+                new MdsProperties.DecimalSettings(8, RoundingMode.HALF_EVEN));
         manager = new MarketStreamManager(properties, book);
         when(exchange.getStreamingMarketDataService()).thenReturn(marketData);
         when(exchange.disconnect()).thenReturn(Completable.complete());
@@ -65,7 +70,7 @@ class MarketStreamManagerTest {
         tickers.onNext(new Ticker.Builder().instrument(BTC_USD.toCurrencyPair()).last(new BigDecimal("100")).build());
 
         assertThat(book.latest("kraken", BTC_USD)).hasValueSatisfying(
-                q -> assertThat(q.last()).isEqualByComparingTo("100"));
+                q -> assertThat(q.last()).isEqualTo(Decimal.parse("100")));
         assertThat(manager.exchangesFor(BTC_USD)).containsExactly("kraken");
         verify(marketData, never()).getTrades(any(CurrencyPair.class));
     }
@@ -115,8 +120,8 @@ class MarketStreamManagerTest {
                 .price(new BigDecimal("100.5")).originalAmount(BigDecimal.ONE).build());
 
         assertThat(book.latest("bitstamp", BTC_USD)).hasValueSatisfying(q -> {
-            assertThat(q.last()).isEqualByComparingTo("100.5");
-            assertThat(q.bid()).isEqualByComparingTo("99");
+            assertThat(q.last()).isEqualTo(Decimal.parse("100.5"));
+            assertThat(q.bid()).isEqualTo(Decimal.parse("99"));
         });
     }
 }

@@ -8,6 +8,7 @@ import java.math.BigDecimal;
 import java.time.Clock;
 import java.time.Instant;
 
+import com.mds.math.Decimal;
 import com.mds.model.MarketPair;
 import com.mds.model.PriceQuote;
 import org.junit.jupiter.api.Test;
@@ -30,10 +31,10 @@ class QuoteBookTest {
         book.onTicker("kraken", BTC_USD, ticker(null, "99.5", "100.5", null));
 
         PriceQuote quote = book.latest("kraken", BTC_USD).orElseThrow();
-        assertThat(quote.last()).isEqualByComparingTo("100");
-        assertThat(quote.bid()).isEqualByComparingTo("99.5");
-        assertThat(quote.ask()).isEqualByComparingTo("100.5");
-        assertThat(quote.volume()).isEqualByComparingTo("5");
+        assertThat(quote.last()).isEqualTo(Decimal.parse("100"));
+        assertThat(quote.bid()).isEqualTo(Decimal.parse("99.5"));
+        assertThat(quote.ask()).isEqualTo(Decimal.parse("100.5"));
+        assertThat(quote.volume()).isEqualTo(Decimal.parse("5"));
         assertThat(quote.timestamp()).isEqualTo(T1);
     }
 
@@ -45,8 +46,8 @@ class QuoteBookTest {
         book.onTrade("bitstamp", BTC_USD, new BigDecimal("100.25"));
 
         PriceQuote quote = book.latest("bitstamp", BTC_USD).orElseThrow();
-        assertThat(quote.last()).isEqualByComparingTo("100.25");
-        assertThat(quote.bid()).isEqualByComparingTo("99");
+        assertThat(quote.last()).isEqualTo(Decimal.parse("100.25"));
+        assertThat(quote.bid()).isEqualTo(Decimal.parse("99"));
         assertThat(book.lastUpdate("bitstamp")).contains(T1);
         assertThat(book.latest("kraken", BTC_USD)).isEmpty();
     }

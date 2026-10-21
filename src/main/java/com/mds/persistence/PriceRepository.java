@@ -1,10 +1,10 @@
 package com.mds.persistence;
 
-import java.math.BigDecimal;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
+import java.util.function.Supplier;
 import java.util.regex.Pattern;
 
 import com.influxdb.client.InfluxDBClient;
@@ -12,11 +12,16 @@ import com.influxdb.client.domain.WritePrecision;
 import com.influxdb.client.write.Point;
 import com.influxdb.query.FluxRecord;
 import com.mds.config.InfluxProperties;
+import com.mds.math.Decimal;
 import com.mds.model.AggregatedPrice;
 import com.mds.model.HistoricalAggregate;
 import com.mds.model.HistoricalTicker;
 import com.mds.model.MarketPair;
 import com.mds.model.PriceQuote;
+import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.DistributionSummary;
+import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.Timer;
 import org.springframework.stereotype.Repository;
 
 /**
@@ -25,6 +30,14 @@ import org.springframework.stereotype.Repository;
  * <ul>
  *   <li>{@code ticker} — one point per exchange per collection, tagged {@code exchange} and {@code pair}</li>
  *   <li>{@code aggregate} — one point per pair per collection, tagged {@code pair}</li>
+ * </ul>
+ *
+ * <p>Metrics:
+ * <ul>
+ *   <li>{@code mds.influx.write} timer, tagged {@code outcome} (success/error)</li>
+ *   <li>{@code mds.influx.points} counter of points written, tagged {@code measurement}</li>
+ *   <li>{@code mds.influx.query} timer, tagged {@code measurement} and {@code outcome}</li>
+ *   <li>{@code mds.influx.query.rows} distribution of rows returned, tagged {@code measurement}</li>
  * </ul>
  */
 @Repository
@@ -39,21 +52,37 @@ public class PriceRepository {
 
     private final InfluxDBClient client;
     private final String bucket;
+    private final MeterRegistry registry;
+    private final Counter tickerPoints;
+    private final Counter aggregatePoints;
 
-    public PriceRepository(InfluxDBClient client, InfluxProperties properties) {
+    public PriceRepository(InfluxDBClient client, InfluxProperties properties, MeterRegistry registry) {
         this.client = client;
         this.bucket = properties.bucket();
+        this.registry = registry;
+        this.tickerPoints = pointsCounter(TICKER);
+        this.aggregatePoints = pointsCounter(AGGREGATE);
     }
 
     public void save(List<AggregatedPrice> aggregates) {
         List<Point> points = new ArrayList<>();
+        int tickers = 0;
         for (AggregatedPrice aggregate : aggregates) {
             points.add(toPoint(aggregate));
-            aggregate.quotes().stream().map(PriceRepository::toPoint).forEach(points::add);
+            for (PriceQuote quote : aggregate.quotes()) {
+                points.add(toPoint(quote));
+                tickers++;
+            }
         }
-        if (!points.isEmpty()) {
+        if (points.isEmpty()) {
+            return;
+        }
+        timed("mds.influx.write", List.of(), () -> {
             client.getWriteApiBlocking().writePoints(points);
-        }
+            return null;
+        });
+        aggregatePoints.increment(aggregates.size());
+        tickerPoints.increment(tickers);
     }
 
     public List<HistoricalTicker> findTickers(MarketPair pair, Optional<String> exchange, Instant from, Instant to,
@@ -64,7 +93,7 @@ public class PriceRepository {
                 .orElse("");
         String flux = query(TICKER, pair, from, to, window, limit, exchangeFilter);
 
-        return records(flux).stream()
+        return records(TICKER, flux).stream()
                 .map(r -> new HistoricalTicker(r.getTime(), (String) r.getValueByKey("exchange"),
                         number(r, "last"), number(r, "bid"), number(r, "ask"),
                         number(r, "high"), number(r, "low"), number(r, "volume")))
@@ -75,7 +104,7 @@ public class PriceRepository {
                                                     Optional<String> window, int limit) {
         String flux = query(AGGREGATE, pair, from, to, window, limit, "");
 
-        return records(flux).stream()
+        return records(AGGREGATE, flux).stream()
                 .map(r -> new HistoricalAggregate(r.getTime(),
                         number(r, "mean"), number(r, "median"), number(r, "vwap"),
                         number(r, "min"), number(r, "max"),
@@ -104,10 +133,40 @@ public class PriceRepository {
                 """.formatted(escape(bucket), from, to, measurement, pair, extraFilter, aggregateWindow, limit);
     }
 
-    private List<FluxRecord> records(String flux) {
-        return client.getQueryApi().query(flux).stream()
-                .flatMap(table -> table.getRecords().stream())
-                .toList();
+    private List<FluxRecord> records(String measurement, String flux) {
+        List<FluxRecord> records = timed("mds.influx.query", List.of("measurement", measurement),
+                () -> client.getQueryApi().query(flux).stream()
+                        .flatMap(table -> table.getRecords().stream())
+                        .toList());
+        DistributionSummary.builder("mds.influx.query.rows")
+                .description("Rows returned per InfluxDB query")
+                .tag("measurement", measurement)
+                .register(registry)
+                .record(records.size());
+        return records;
+    }
+
+    /** Runs {@code call}, recording its duration under {@code name} with an outcome tag. */
+    private <T> T timed(String name, List<String> tags, Supplier<T> call) {
+        Timer.Sample sample = Timer.start(registry);
+        String outcome = "error";
+        try {
+            T result = call.get();
+            outcome = "success";
+            return result;
+        } finally {
+            sample.stop(Timer.builder(name)
+                    .tags(tags.toArray(String[]::new))
+                    .tag("outcome", outcome)
+                    .register(registry));
+        }
+    }
+
+    private Counter pointsCounter(String measurement) {
+        return Counter.builder("mds.influx.points")
+                .description("Points written to InfluxDB")
+                .tag("measurement", measurement)
+                .register(registry);
     }
 
     private static Point toPoint(PriceQuote quote) {
@@ -140,7 +199,7 @@ public class PriceRepository {
         return point;
     }
 
-    private static void addField(Point point, String name, BigDecimal value) {
+    private static void addField(Point point, String name, Decimal value) {
         if (value != null) {
             point.addField(name, value.doubleValue());
         }

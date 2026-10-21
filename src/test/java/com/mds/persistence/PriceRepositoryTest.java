@@ -2,6 +2,7 @@ package com.mds.persistence;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatIllegalArgumentException;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
@@ -15,6 +16,7 @@ import com.influxdb.client.InfluxDBClient;
 import com.influxdb.client.QueryApi;
 import com.mds.config.InfluxProperties;
 import com.mds.model.MarketPair;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
@@ -26,6 +28,7 @@ class PriceRepositoryTest {
     private static final Instant TO = Instant.parse("2026-10-21T12:00:00Z");
 
     private final QueryApi queryApi = mock(QueryApi.class);
+    private final SimpleMeterRegistry registry = new SimpleMeterRegistry();
     private PriceRepository repository;
 
     @BeforeEach
@@ -33,7 +36,8 @@ class PriceRepositoryTest {
         InfluxDBClient client = mock(InfluxDBClient.class);
         when(client.getQueryApi()).thenReturn(queryApi);
         when(queryApi.query(anyString())).thenReturn(List.of());
-        repository = new PriceRepository(client, new InfluxProperties("http://localhost:8086", "t", "mds", "prices"));
+        repository = new PriceRepository(client, new InfluxProperties("http://localhost:8086", "t", "mds", "prices"),
+                registry);
     }
 
     @Test
@@ -57,5 +61,23 @@ class PriceRepositoryTest {
                 repository.findAggregates(BTC_USDT, FROM, TO, Optional.of("1m) |> drop("), 10));
         assertThatIllegalArgumentException().isThrownBy(() ->
                 repository.findTickers(BTC_USDT, Optional.of("x\" or true"), FROM, TO, Optional.empty(), 10));
+    }
+
+    @Test
+    void recordsQueryTimingAndRowCount() {
+        repository.findAggregates(BTC_USDT, FROM, TO, Optional.empty(), 10);
+
+        assertThat(registry.get("mds.influx.query").tag("measurement", "aggregate").tag("outcome", "success")
+                .timer().count()).isEqualTo(1);
+        assertThat(registry.get("mds.influx.query.rows").summary().count()).isEqualTo(1);
+    }
+
+    @Test
+    void recordsFailedQueriesWithErrorOutcome() {
+        when(queryApi.query(anyString())).thenThrow(new RuntimeException("connection refused"));
+
+        assertThatThrownBy(() -> repository.findAggregates(BTC_USDT, FROM, TO, Optional.empty(), 10))
+                .hasMessage("connection refused");
+        assertThat(registry.get("mds.influx.query").tag("outcome", "error").timer().count()).isEqualTo(1);
     }
 }

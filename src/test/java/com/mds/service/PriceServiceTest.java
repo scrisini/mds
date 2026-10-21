@@ -7,6 +7,7 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 import java.math.BigDecimal;
+import java.math.RoundingMode;
 import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
@@ -14,6 +15,7 @@ import java.util.List;
 
 import com.mds.config.MdsProperties;
 import com.mds.exchange.MarketStreamManager;
+import com.mds.math.Decimal;
 import com.mds.model.AggregatedPrice;
 import com.mds.model.MarketPair;
 import org.junit.jupiter.api.BeforeEach;
@@ -33,7 +35,10 @@ class PriceServiceTest {
     void setUp() {
         MdsProperties properties = new MdsProperties(List.of("binance", "kraken", "kucoin"), List.of("BTC/USDT"),
                 Duration.ofSeconds(10), Duration.ofSeconds(5), Duration.ofSeconds(60),
-                new MdsProperties.Archive(false, Duration.ofSeconds(5)));
+                new MdsProperties.Archive(false, Duration.ofSeconds(5)),
+                new MdsProperties.Stream(Duration.ofSeconds(1), Duration.ofMillis(100), Duration.ofSeconds(60),
+                        Duration.ofMinutes(30), 2),
+                new MdsProperties.DecimalSettings(8, RoundingMode.HALF_EVEN));
         service = new PriceService(streams, book, new PriceAggregator(), properties, clock);
         when(streams.exchangesFor(BTC_USDT)).thenReturn(List.of("binance", "kraken", "kucoin"));
     }
@@ -49,7 +54,7 @@ class PriceServiceTest {
         AggregatedPrice result = service.aggregate(BTC_USDT);
 
         assertThat(result.sources()).isEqualTo(1);
-        assertThat(result.mean()).isEqualByComparingTo("100");
+        assertThat(result.mean()).isEqualTo(Decimal.parse("100"));
         assertThat(result.failures()).extracting("exchange", "reason").containsExactly(
                 tuple("kraken", "stale, last update 2026-10-21T11:58:00Z"),
                 tuple("kucoin", "awaiting first update"));

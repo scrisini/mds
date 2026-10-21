@@ -1,5 +1,6 @@
 package com.mds.config;
 
+import java.math.RoundingMode;
 import java.time.Duration;
 import java.util.List;
 
@@ -15,6 +16,8 @@ import org.springframework.boot.context.properties.bind.DefaultValue;
  * @param reconnectDelay    wait before retrying a failed connection or a terminated stream
  * @param staleAfter        quotes older than this are left out of aggregates
  * @param archive           snapshot archiving settings
+ * @param stream            client SSE subscription settings
+ * @param decimal           precision of all prices and volumes
  */
 @ConfigurationProperties("mds")
 public record MdsProperties(
@@ -23,7 +26,9 @@ public record MdsProperties(
         @DefaultValue("10s") Duration connectionTimeout,
         @DefaultValue("5s") Duration reconnectDelay,
         @DefaultValue("60s") Duration staleAfter,
-        @DefaultValue Archive archive) {
+        @DefaultValue Archive archive,
+        @DefaultValue Stream stream,
+        @DefaultValue DecimalSettings decimal) {
 
     /**
      * @param enabled  whether snapshots of the live quotes are written to InfluxDB
@@ -32,5 +37,32 @@ public record MdsProperties(
     public record Archive(
             @DefaultValue("true") boolean enabled,
             @DefaultValue("5s") Duration interval) {
+    }
+
+    /**
+     * @param defaultThrottle minimum time between events when the client doesn't ask for one
+     * @param minThrottle     lowest throttle a client may request
+     * @param maxThrottle     highest throttle a client may request
+     * @param timeout         connection lifetime, after which clients reconnect
+     * @param maxSubscribers  concurrent subscriptions allowed across all clients
+     */
+    public record Stream(
+            @DefaultValue("1s") Duration defaultThrottle,
+            @DefaultValue("100ms") Duration minThrottle,
+            @DefaultValue("60s") Duration maxThrottle,
+            @DefaultValue("30m") Duration timeout,
+            @DefaultValue("1000") int maxSubscribers) {
+    }
+
+    /**
+     * Fixed for the life of the process; see {@link com.mds.math.Decimal}. The representable
+     * range is {@code ±Long.MAX_VALUE / 10^scale}.
+     *
+     * @param scale    decimal places kept, 0 to 18
+     * @param rounding rounding applied whenever a result has more places than {@code scale}
+     */
+    public record DecimalSettings(
+            @DefaultValue("8") int scale,
+            @DefaultValue("HALF_EVEN") RoundingMode rounding) {
     }
 }

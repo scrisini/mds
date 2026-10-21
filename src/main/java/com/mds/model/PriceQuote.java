@@ -1,7 +1,8 @@
 package com.mds.model;
 
-import java.math.BigDecimal;
 import java.time.Instant;
+
+import com.mds.math.Decimal;
 
 /**
  * The latest known ticker state for one pair on one exchange. Any price field may be null
@@ -12,13 +13,13 @@ import java.time.Instant;
 public record PriceQuote(
         String exchange,
         String pair,
-        BigDecimal last,
-        BigDecimal bid,
-        BigDecimal ask,
-        BigDecimal high,
-        BigDecimal low,
-        BigDecimal volume,
-        BigDecimal quoteVolume,
+        Decimal last,
+        Decimal bid,
+        Decimal ask,
+        Decimal high,
+        Decimal low,
+        Decimal volume,
+        Decimal quoteVolume,
         Instant timestamp) {
 
     /**

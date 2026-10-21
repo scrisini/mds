@@ -6,10 +6,10 @@ import static org.springframework.test.web.servlet.request.MockMvcRequestBuilder
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
-import java.math.BigDecimal;
 import java.time.Instant;
 import java.util.List;
 
+import com.mds.math.Decimal;
 import com.mds.model.AggregatedPrice;
 import com.mds.model.MarketPair;
 import com.mds.model.QuoteFailure;
@@ -40,7 +40,7 @@ class PriceControllerTest {
 
     @Test
     void returnsLiveAggregate() throws Exception {
-        BigDecimal price = new BigDecimal("67000.5");
+        Decimal price = Decimal.parse("67000.5");
         when(priceService.aggregate(BTC_USDT)).thenReturn(new AggregatedPrice("BTC/USDT",
                 Instant.parse("2026-10-21T12:00:00Z"), 1, price, price, null, price, price,
                 null, null, null, null, List.of(), List.of()));

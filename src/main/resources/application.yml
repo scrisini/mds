@@ -17,6 +17,16 @@ mds:
   archive:
     enabled: true
     interval: ${MDS_ARCHIVE_INTERVAL:5s}
+  stream:
+    default-throttle: 1s
+    min-throttle: 100ms
+    max-throttle: 60s
+    timeout: 30m
+    max-subscribers: 1000
+  # Precision of every price and volume; fixed at startup. Range is ±Long.MAX_VALUE / 10^scale.
+  decimal:
+    scale: ${MDS_DECIMAL_SCALE:8}
+    rounding: ${MDS_DECIMAL_ROUNDING:HALF_EVEN}
   influx:
     url: ${MDS_INFLUX_URL:http://localhost:8086}
     token: ${MDS_INFLUX_TOKEN:mds-dev-token}
@@ -31,6 +41,14 @@ management:
   endpoint:
     health:
       show-details: always
+  metrics:
+    tags:
+      application: mds
+    distribution:
+      # REST API calls are timed by Spring as http.server.requests (tags: method, uri, status, outcome)
+      percentiles:
+        http.server.requests: 0.5,0.95,0.99
+        mds.influx: 0.5,0.95,0.99
 
 logging:
   level:
