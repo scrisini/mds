@@ -23,6 +23,10 @@ mds:
     max-throttle: 60s
     timeout: 30m
     max-subscribers: 1000
+  ohlc:
+    # midnight in this zone starts each day/week (Monday)/month/year candle
+    zone: ${MDS_OHLC_ZONE:UTC}
+    flush-interval: 10s
   # Precision of every price and volume; fixed at startup. Range is ±Long.MAX_VALUE / 10^scale.
   decimal:
     scale: ${MDS_DECIMAL_SCALE:8}

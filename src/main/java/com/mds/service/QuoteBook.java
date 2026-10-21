@@ -11,6 +11,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import com.mds.math.Decimal;
 import com.mds.model.MarketPair;
 import com.mds.model.PriceQuote;
+import com.mds.model.QuoteUpdate;
 import io.reactivex.rxjava3.core.Observable;
 import io.reactivex.rxjava3.subjects.PublishSubject;
 import io.reactivex.rxjava3.subjects.Subject;
@@ -38,7 +39,7 @@ public class QuoteBook {
     private final Map<String, Instant> lastUpdate = new ConcurrentHashMap<>();
     private final Set<String> reportedOverflows = ConcurrentHashMap.newKeySet();
     // serialized: onNext is called concurrently from several exchanges' threads
-    private final Subject<MarketPair> updates = PublishSubject.<MarketPair>create().toSerialized();
+    private final Subject<QuoteUpdate> updates = PublishSubject.<QuoteUpdate>create().toSerialized();
 
     public QuoteBook(Clock clock) {
         this.clock = clock;
@@ -71,15 +72,18 @@ public class QuoteBook {
         return Optional.ofNullable(lastUpdate.get(exchange));
     }
 
-    /** Emits the pair each time any exchange's quote for it changes. Never terminates. */
-    public Observable<MarketPair> updates() {
+    /**
+     * Emits the merged quote each time any exchange's quote changes. Never terminates; emissions
+     * are serialized, so subscribers never see two at once.
+     */
+    public Observable<QuoteUpdate> updates() {
         return updates.hide();
     }
 
     private void apply(PriceQuote update, MarketPair pair) {
-        quotes.merge(new Key(update.exchange(), pair), update, PriceQuote::mergedWith);
+        PriceQuote merged = quotes.merge(new Key(update.exchange(), pair), update, PriceQuote::mergedWith);
         lastUpdate.put(update.exchange(), update.timestamp());
-        updates.onNext(pair);
+        updates.onNext(new QuoteUpdate(pair, merged));
     }
 
     private Decimal convert(String exchange, String field, BigDecimal value) {

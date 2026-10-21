@@ -9,6 +9,7 @@ exchange WebSockets ──► MarketStreamManager ──► QuoteBook (latest qu
                                                    │
                         REST /api/v1/prices ◄──────┤  aggregated on each request
                         SSE /api/v1/stream ◄───────┤  pushed on change, throttled per client
+                        CandleService ◄────────────┤  OHLC per tick ──► InfluxDB (every 10s + at midnight)
                         PriceArchiver (every 5s) ◄─┘──► InfluxDB ──► REST /api/v1/history
 ```
 
@@ -37,6 +38,8 @@ InfluxDB UI: http://localhost:8086 (admin / admin-password).
 | GET | `/api/v1/history/{pair}` | Archived aggregates |
 | GET | `/api/v1/history/{pair}/tickers` | Archived per-exchange tickers; optional `exchange=` |
 | GET | `/api/v1/stream/prices/{pair}?throttle=1s` | Server-Sent Events stream of live aggregates |
+| GET | `/api/v1/candles/{pair}?period=day&source=index` | Stored OHLC candles (`day`, `week`, `month`, `year`), oldest first |
+| GET | `/api/v1/candles/{pair}/current?source=index` | Live in-progress candles for every period |
 | GET | `/actuator/health` | Includes `influx` and `streams` (up while any exchange is connected) checks |
 
 History endpoints accept `from` / `to` (ISO-8601, default: last hour), `window` (`30s`, `5m`, `1h`, `1d`…
@@ -82,6 +85,7 @@ returned as RFC 9457 problem details; pairs that aren't subscribed return 404.
 | `mds.stream.default-throttle` / `min-throttle` / `max-throttle` | | `1s` / `100ms` / `60s` |
 | `mds.stream.timeout` / `max-subscribers` | | `30m` / `1000` |
 | `mds.decimal.scale` / `.rounding` | `MDS_DECIMAL_SCALE` / `MDS_DECIMAL_ROUNDING` | `8` / `HALF_EVEN` |
+| `mds.ohlc.zone` / `.flush-interval` | `MDS_OHLC_ZONE` | `UTC` / `10s` |
 | `mds.influx.url` / `token` / `org` / `bucket` | `MDS_INFLUX_*` | `http://localhost:8086` / `mds-dev-token` / `mds` / `prices` |
 
 Each pair is subscribed on every exchange that lists it. Dropped sockets are reconnected by XChange;
@@ -101,6 +105,40 @@ entry in `SupportedExchange`.
   subscribed; unlisted ones simply never update.
 - `volume` is whatever each exchange's stream reports (mostly 24h base volume; KuCoin's is the last
   trade size), so VWAP is indicative.
+
+## OHLC candles
+
+`CandleService` builds open/high/low/close candles for every pair, for each calendar `day`, `week`
+(Monday start), `month` and `year`, from two kinds of source:
+
+- `index` — the cross-exchange median of fresh last prices (robust to one exchange printing an outlier)
+- each exchange id — that exchange's last price
+
+Candles are updated in memory on every quote update, so highs and lows see every tick, not just
+the 5-second archive snapshots. Periods start at local midnight in `mds.ohlc.zone` (default UTC).
+
+Keeping them timely:
+
+- every `mds.ohlc.flush-interval` (10s) all in-progress candles are upserted with `complete=false`,
+  and candles whose period has ended are closed and written with `complete=true`;
+- an extra flush at midnight in `mds.ohlc.zone` (the boundary every period shares) closes the
+  ended candles within a second of the period end;
+- a completed candle that fails to write is retried on each flush until it succeeds;
+- on startup, incomplete candles are reloaded from InfluxDB: the current period's continue with
+  their open, high and low intact, and any whose period ended while the service was down are
+  completed. A final flush runs on shutdown.
+
+A new period's candle opens at the first price after the boundary. Updates during downtime are
+lost, so a candle spanning an outage reflects only the prices seen while running. Run one instance
+per InfluxDB bucket: two instances would overwrite each other's candles.
+
+```bash
+curl 'localhost:8080/api/v1/candles/BTC-USDT?period=week'
+curl 'localhost:8080/api/v1/candles/ETH-USD/current?source=kraken'
+```
+
+History accepts `from` / `to` (ISO-8601, candles whose period *starts* in the range) and `limit`;
+`from` defaults to 30 days, 26 weeks, 24 months or 10 years back.
 
 ## Decimal precision
 
@@ -124,7 +162,7 @@ Micrometer meters, visible at `/actuator/metrics/{name}` and tagged `application
 | Meter | Type | Tags |
 |---|---|---|
 | `http.server.requests` | timer, p50/p95/p99 | `method`, `uri`, `status`, `outcome` — every REST call |
-| `mds.influx.write` | timer, p50/p95/p99 | `outcome` |
+| `mds.influx.write` | timer, p50/p95/p99 | `batch` (prices/candles), `outcome` |
 | `mds.influx.points` | counter | `measurement` |
 | `mds.influx.query` | timer, p50/p95/p99 | `measurement`, `outcome` |
 | `mds.influx.query.rows` | distribution | `measurement` |
@@ -144,10 +182,12 @@ For SSE requests `http.server.requests` measures the whole connection.
 |---|---|---|
 | `ticker` | `exchange`, `pair` | `last`, `bid`, `ask`, `high`, `low`, `volume`, `quote_volume` |
 | `aggregate` | `pair` | `mean`, `median`, `vwap`, `min`, `max`, `best_bid`, `best_ask`, `sources` |
+| `ohlc` | `pair`, `source`, `period` | `open`, `high`, `low`, `close`, `updates`, `complete` |
 
 Snapshots are taken every `mds.archive.interval`. Ticker points carry the time their last update
 was received, so an exchange that hasn't changed between snapshots overwrites its previous point
-instead of adding a duplicate. The compose bucket has infinite retention.
+instead of adding a duplicate. `ohlc` points are timestamped at the period start and overwritten
+as the candle changes. The compose bucket has infinite retention.
 
 ## Layout
 
@@ -156,9 +196,9 @@ com.mds
 ├── config/        properties, InfluxDB client, clock, decimal precision, SSE executor
 ├── exchange/      SupportedExchange, MarketStreamManager (WebSocket lifecycle), stream health check
 ├── math/          Decimal (fixed-point) and its JSON serializer
-├── model/         MarketPair, PriceQuote, AggregatedPrice, ExchangeStatus, history rows
+├── model/         MarketPair, PriceQuote, AggregatedPrice, Candle, CandlePeriod, ExchangeStatus, history rows
 ├── service/       QuoteBook (live quotes), PriceService, PriceAggregator, PriceArchiver (@Scheduled),
-│                  PriceStreamService (SSE + throttling)
+│                  PriceStreamService (SSE + throttling), CandleService (OHLC)
 ├── persistence/   PriceRepository (Flux queries), InfluxHealthIndicator
 └── web/           REST controllers, ApiExceptionHandler
 ```

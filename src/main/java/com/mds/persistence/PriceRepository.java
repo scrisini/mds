@@ -14,6 +14,8 @@ import com.influxdb.query.FluxRecord;
 import com.mds.config.InfluxProperties;
 import com.mds.math.Decimal;
 import com.mds.model.AggregatedPrice;
+import com.mds.model.Candle;
+import com.mds.model.CandlePeriod;
 import com.mds.model.HistoricalAggregate;
 import com.mds.model.HistoricalTicker;
 import com.mds.model.MarketPair;
@@ -30,11 +32,13 @@ import org.springframework.stereotype.Repository;
  * <ul>
  *   <li>{@code ticker} — one point per exchange per collection, tagged {@code exchange} and {@code pair}</li>
  *   <li>{@code aggregate} — one point per pair per collection, tagged {@code pair}</li>
+ *   <li>{@code ohlc} — one point per candle, tagged {@code pair}, {@code source} and {@code period},
+ *       timestamped at the period start and overwritten as the candle changes</li>
  * </ul>
  *
  * <p>Metrics:
  * <ul>
- *   <li>{@code mds.influx.write} timer, tagged {@code outcome} (success/error)</li>
+ *   <li>{@code mds.influx.write} timer, tagged {@code batch} (prices/candles) and {@code outcome}</li>
  *   <li>{@code mds.influx.points} counter of points written, tagged {@code measurement}</li>
  *   <li>{@code mds.influx.query} timer, tagged {@code measurement} and {@code outcome}</li>
  *   <li>{@code mds.influx.query.rows} distribution of rows returned, tagged {@code measurement}</li>
@@ -45,6 +49,7 @@ public class PriceRepository {
 
     static final String TICKER = "ticker";
     static final String AGGREGATE = "aggregate";
+    static final String OHLC = "ohlc";
 
     /** Flux duration literal, e.g. {@code 30s}, {@code 5m}, {@code 1h}. */
     private static final Pattern WINDOW = Pattern.compile("[1-9][0-9]{0,4}(s|m|h|d|w)");
@@ -55,6 +60,7 @@ public class PriceRepository {
     private final MeterRegistry registry;
     private final Counter tickerPoints;
     private final Counter aggregatePoints;
+    private final Counter candlePoints;
 
     public PriceRepository(InfluxDBClient client, InfluxProperties properties, MeterRegistry registry) {
         this.client = client;
@@ -62,6 +68,7 @@ public class PriceRepository {
         this.registry = registry;
         this.tickerPoints = pointsCounter(TICKER);
         this.aggregatePoints = pointsCounter(AGGREGATE);
+        this.candlePoints = pointsCounter(OHLC);
     }
 
     public void save(List<AggregatedPrice> aggregates) {
@@ -77,12 +84,47 @@ public class PriceRepository {
         if (points.isEmpty()) {
             return;
         }
-        timed("mds.influx.write", List.of(), () -> {
-            client.getWriteApiBlocking().writePoints(points);
-            return null;
-        });
+        write("prices", points);
         aggregatePoints.increment(aggregates.size());
         tickerPoints.increment(tickers);
+    }
+
+    /** Upserts candles; rewriting a candle replaces the point at its period start. */
+    public void saveCandles(List<Candle> candles) {
+        if (candles.isEmpty()) {
+            return;
+        }
+        write("candles", candles.stream().map(PriceRepository::toPoint).toList());
+        candlePoints.increment(candles.size());
+    }
+
+    /** Candles starting in {@code [from, to)}, oldest first. */
+    public List<Candle> findCandles(MarketPair pair, String source, CandlePeriod period, Instant from, Instant to,
+                                    int limit) {
+        require(EXCHANGE_ID, source, "source");
+        String flux = """
+                from(bucket: "%s")
+                  |> range(start: %s, stop: %s)
+                  |> filter(fn: (r) => r._measurement == "%s" and r.pair == "%s" and r.source == "%s" and r.period == "%s")
+                  |> pivot(rowKey: ["_time"], columnKey: ["_field"], valueColumn: "_value")
+                  |> group()
+                  |> sort(columns: ["_time"])
+                  |> limit(n: %d)
+                """.formatted(escape(bucket), from, to, OHLC, pair, source, period.id(), limit);
+        return records(OHLC, flux).stream().map(PriceRepository::toCandle).toList();
+    }
+
+    /** Every candle not yet marked complete whose period started at or after {@code since}. */
+    public List<Candle> findIncompleteCandles(Instant since) {
+        String flux = """
+                from(bucket: "%s")
+                  |> range(start: %s)
+                  |> filter(fn: (r) => r._measurement == "%s")
+                  |> pivot(rowKey: ["_time"], columnKey: ["_field"], valueColumn: "_value")
+                  |> filter(fn: (r) => r.complete == false)
+                  |> group()
+                """.formatted(escape(bucket), since, OHLC);
+        return records(OHLC, flux).stream().map(PriceRepository::toCandle).toList();
     }
 
     public List<HistoricalTicker> findTickers(MarketPair pair, Optional<String> exchange, Instant from, Instant to,
@@ -146,6 +188,13 @@ public class PriceRepository {
         return records;
     }
 
+    private void write(String batch, List<Point> points) {
+        timed("mds.influx.write", List.of("batch", batch), () -> {
+            client.getWriteApiBlocking().writePoints(points);
+            return null;
+        });
+    }
+
     /** Runs {@code call}, recording its duration under {@code name} with an outcome tag. */
     private <T> T timed(String name, List<String> tags, Supplier<T> call) {
         Timer.Sample sample = Timer.start(registry);
@@ -197,6 +246,32 @@ public class PriceRepository {
         addField(point, "best_bid", aggregate.bestBid());
         addField(point, "best_ask", aggregate.bestAsk());
         return point;
+    }
+
+    private static Point toPoint(Candle candle) {
+        return Point.measurement(OHLC)
+                .addTag("pair", candle.pair())
+                .addTag("source", candle.source())
+                .addTag("period", candle.period().id())
+                .time(candle.start(), WritePrecision.S)
+                .addField("open", candle.open().doubleValue())
+                .addField("high", candle.high().doubleValue())
+                .addField("low", candle.low().doubleValue())
+                .addField("close", candle.close().doubleValue())
+                .addField("updates", candle.updates())
+                .addField("complete", candle.complete());
+    }
+
+    private static Candle toCandle(FluxRecord r) {
+        return new Candle((String) r.getValueByKey("pair"), (String) r.getValueByKey("source"),
+                CandlePeriod.parse((String) r.getValueByKey("period")), r.getTime(),
+                decimal(r, "open"), decimal(r, "high"), decimal(r, "low"), decimal(r, "close"),
+                r.getValueByKey("updates") instanceof Number n ? n.longValue() : 0,
+                Boolean.TRUE.equals(r.getValueByKey("complete")));
+    }
+
+    private static Decimal decimal(FluxRecord record, String key) {
+        return Decimal.ofDouble(((Number) record.getValueByKey(key)).doubleValue());
     }
 
     private static void addField(Point point, String name, Decimal value) {

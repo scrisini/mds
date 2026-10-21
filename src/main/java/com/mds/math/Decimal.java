@@ -124,6 +124,17 @@ public final class Decimal implements Comparable<Decimal> {
         return new Decimal(value.setScale(s.scale(), s.rounding()).unscaledValue().longValueExact());
     }
 
+    /**
+     * Nearest value at the configured scale. Doubles carry ~15-17 significant digits, so only
+     * use this for values that were stored as doubles, such as InfluxDB fields.
+     */
+    public static Decimal ofDouble(double value) {
+        if (!Double.isFinite(value)) {
+            throw new IllegalArgumentException("Not a finite number: " + value);
+        }
+        return of(BigDecimal.valueOf(value));
+    }
+
     /** {@link #of(BigDecimal)}, mapping null to null. */
     public static Decimal ofNullable(BigDecimal value) {
         return value == null ? null : of(value);

@@ -17,7 +17,7 @@ public class InfluxHealthIndicator extends AbstractHealthIndicator {
 
     @Override
     protected void doHealthCheck(Health.Builder builder) {
-        if (Boolean.TRUE.equals(client.ping())) {
+        if (client.ping()) {
             builder.up().withDetail("version", client.version());
         } else {
             builder.down();

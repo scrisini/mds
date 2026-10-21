@@ -2,6 +2,7 @@ package com.mds.config;
 
 import java.math.RoundingMode;
 import java.time.Duration;
+import java.time.ZoneId;
 import java.util.List;
 
 import org.springframework.boot.context.properties.ConfigurationProperties;
@@ -18,6 +19,7 @@ import org.springframework.boot.context.properties.bind.DefaultValue;
  * @param archive           snapshot archiving settings
  * @param stream            client SSE subscription settings
  * @param decimal           precision of all prices and volumes
+ * @param ohlc              OHLC candle settings
  */
 @ConfigurationProperties("mds")
 public record MdsProperties(
@@ -28,7 +30,8 @@ public record MdsProperties(
         @DefaultValue("60s") Duration staleAfter,
         @DefaultValue Archive archive,
         @DefaultValue Stream stream,
-        @DefaultValue DecimalSettings decimal) {
+        @DefaultValue DecimalSettings decimal,
+        @DefaultValue Ohlc ohlc) {
 
     /**
      * @param enabled  whether snapshots of the live quotes are written to InfluxDB
@@ -64,5 +67,14 @@ public record MdsProperties(
     public record DecimalSettings(
             @DefaultValue("8") int scale,
             @DefaultValue("HALF_EVEN") RoundingMode rounding) {
+    }
+
+    /**
+     * @param zone          time zone whose midnight starts each day/week/month/year candle
+     * @param flushInterval how often in-progress candles are written and ended periods closed
+     */
+    public record Ohlc(
+            @DefaultValue("UTC") ZoneId zone,
+            @DefaultValue("10s") Duration flushInterval) {
     }
 }

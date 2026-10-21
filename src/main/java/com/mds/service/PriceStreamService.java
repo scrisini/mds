@@ -12,6 +12,7 @@ import java.util.concurrent.atomic.AtomicLong;
 import com.mds.config.MdsProperties;
 import com.mds.model.AggregatedPrice;
 import com.mds.model.MarketPair;
+import com.mds.model.QuoteUpdate;
 import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.Gauge;
 import io.micrometer.core.instrument.MeterRegistry;
@@ -122,6 +123,7 @@ public class PriceStreamService {
     /** Throttled aggregates for the pair, starting with the current one. */
     Flowable<AggregatedPrice> updates(MarketPair pair, Duration throttle) {
         return quoteBook.updates()
+                .map(QuoteUpdate::pair)
                 .filter(pair::equals)
                 .startWithItem(pair)
                 .throttleLatest(throttle.toMillis(), TimeUnit.MILLISECONDS, throttleScheduler, true)
