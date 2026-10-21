@@ -1,0 +1,38 @@
+spring:
+  application:
+    name: mds
+  threads:
+    virtual:
+      enabled: true
+
+server:
+  port: 8080
+
+mds:
+  exchanges: ${MDS_EXCHANGES:binance,kraken,bitstamp,kucoin,bitfinex}
+  pairs: ${MDS_PAIRS:BTC/USDT,ETH/USDT,BTC/USD,ETH/USD}
+  fetch-timeout: 5s
+  collector:
+    enabled: true
+    initial-delay: 5s
+    interval: 30s
+  influx:
+    url: ${MDS_INFLUX_URL:http://localhost:8086}
+    token: ${MDS_INFLUX_TOKEN:mds-dev-token}
+    org: ${MDS_INFLUX_ORG:mds}
+    bucket: ${MDS_INFLUX_BUCKET:prices}
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics
+  endpoint:
+    health:
+      show-details: always
+
+logging:
+  level:
+    com.mds: INFO
+    # XChange logs every HTTP call at INFO
+    si.mazi.rescu: WARN

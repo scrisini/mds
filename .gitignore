@@ -1,0 +1,8 @@
+.gradle/
+build/
+out/
+!gradle/wrapper/gradle-wrapper.jar
+*.log
+.DS_Store
+.idea/workspace.xml
+.idea/shelf/
