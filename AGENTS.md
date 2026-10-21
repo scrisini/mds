@@ -21,6 +21,8 @@ OHLC candles, and archives everything in InfluxDB 2.x.
 scripts/dev.sh check           # verify local prerequisites (Java, Docker, ports, exchange reachability)
 scripts/dev.sh run [args...]   # start InfluxDB, then the app on :8080; args go to Spring Boot
 scripts/dev.sh status          # InfluxDB and app health
+scripts/dev.sh hooks           # install the commit-msg hook (do this once per clone)
+scripts/test-commit-msg.sh     # test the hook after changing it or .commitlintrc.json
 ```
 
 See README "Running locally" for prerequisites and all `scripts/dev.sh` commands. Never run
@@ -92,8 +94,11 @@ Check with `pgrep -fl com.mds.MdsApplication` first. Start your copy with a mark
 
 ## Commits and releases
 
-Commits follow [Conventional Commits](https://www.conventionalcommits.org/), enforced by
-`.commitlintrc.json` and read by semantic-release (`.releaserc.json`) to pick the next version:
+Commits follow [Conventional Commits](https://www.conventionalcommits.org/), enforced locally by
+`.githooks/commit-msg` (install with `scripts/dev.sh hooks`) and on pull requests by the
+`commitlint` workflow, both using `.commitlintrc.json`. semantic-release (`.releaserc.json`) reads
+them to pick the next version. Never use `git commit --no-verify`; if the hook rejects a message,
+fix the message. Full guide: README "Contributing".
 
 ```
 <type>(<optional scope>): <imperative summary, lower case, no period>
@@ -126,4 +131,9 @@ fix(streaming): resubscribe when an exchange stream completes
 feat(api)!: rename POST /prices/collect to /prices/archive
 ```
 
-Branch from `main`, keep commits focused, and open a pull request; don't push directly to `main`.
+Branching (README "Branching and merging"): branch from `develop`, open a pull request into
+`develop` and merge it with a **merge commit** (never squash or rebase into `develop`). Releases
+go `develop` → `main` by **squash** merge, with a PR title that is a valid Conventional Commit
+carrying the highest bump of the included changes; afterwards back-merge `main` into `develop`
+with a merge commit. Never push directly to `main` or `develop`. If `develop` doesn't exist yet,
+branch from `main` and target `main`.
