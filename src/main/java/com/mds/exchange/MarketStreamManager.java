@@ -1,5 +1,6 @@
 package com.mds.exchange;
 
+import java.net.Proxy;
 import java.time.Duration;
 import java.util.List;
 import java.util.Map;
@@ -23,12 +24,19 @@ import org.knowm.xchange.ExchangeFactory;
 import org.knowm.xchange.ExchangeSpecification;
 import org.knowm.xchange.currency.CurrencyPair;
 import org.knowm.xchange.instrument.Instrument;
+import si.mazi.rescu.ClientConfig;
 import org.springframework.context.SmartLifecycle;
 import org.springframework.stereotype.Component;
 
 /**
  * Opens a WebSocket connection to each configured exchange and feeds every ticker (and,
  * where needed, trade) update into the {@link QuoteBook}.
+ *
+ * <p>When {@code mds.socks-proxy.host} is set, every exchange connection goes through that SOCKS5
+ * proxy: WebSocket streams via XChange's streaming SOCKS settings, and the REST calls XChange makes
+ * while connecting via rescu (whose proxy type is set to SOCKS in {@code rescu.properties}). This
+ * fails closed: startup is refused if the REST client would not use SOCKS, and a connection that
+ * fails through the proxy is retried through the proxy, never directly.
  *
  * <p>Failed connections and terminated streams are retried after
  * {@link MdsProperties#reconnectDelay()}; XChange additionally reconnects dropped sockets
@@ -55,6 +63,8 @@ public class MarketStreamManager implements SmartLifecycle {
 
     @Override
     public void start() {
+        // XChange builds each REST client from these defaults, then sets only proxy host and port
+        verifyProxySupport(new ClientConfig().getProxyType());
         List<MarketPair> pairs = properties.pairs().stream().map(MarketPair::parse).toList();
         for (String id : properties.exchanges()) {
             SupportedExchange.fromId(id).ifPresentOrElse(
@@ -173,15 +183,46 @@ public class MarketStreamManager implements SmartLifecycle {
             StreamingExchange exchange = (StreamingExchange) ExchangeFactory.INSTANCE
                     .createExchangeWithoutSpecification(supported.exchangeClass());
             ExchangeSpecification spec = exchange.getDefaultExchangeSpecification();
-            int timeout = (int) properties.connectionTimeout().toMillis();
-            spec.setHttpConnTimeout(timeout);
-            spec.setHttpReadTimeout(timeout);
+            configure(spec, properties);
             exchange.applySpecification(spec);
             return Optional.of(exchange);
         } catch (RuntimeException e) {
             log.warn("Could not initialise exchange '{}': {}", supported.id(), e.getMessage());
             return Optional.empty();
         }
+    }
+
+    /** Applies timeouts and, when configured, the SOCKS proxy for both REST and WebSocket traffic. */
+    static void configure(ExchangeSpecification spec, MdsProperties properties) {
+        int timeout = (int) properties.connectionTimeout().toMillis();
+        spec.setHttpConnTimeout(timeout);
+        spec.setHttpReadTimeout(timeout);
+        MdsProperties.SocksProxy proxy = properties.socksProxy();
+        if (proxy.enabled()) {
+            // REST (rescu): host and port here, proxy type SOCKS from rescu.properties
+            spec.setProxyHost(proxy.host());
+            spec.setProxyPort(proxy.port());
+            // WebSocket (netty): read by StreamingExchange.applyStreamingSpecification
+            spec.setExchangeSpecificParametersItem(StreamingExchange.SOCKS_PROXY_HOST, proxy.host());
+            spec.setExchangeSpecificParametersItem(StreamingExchange.SOCKS_PROXY_PORT, proxy.port());
+        }
+    }
+
+    /**
+     * Refuses to start if a proxy is configured but exchange REST calls would not use SOCKS, which
+     * would happen if {@code rescu.properties} were missing or changed.
+     */
+    void verifyProxySupport(Proxy.Type restProxyType) {
+        MdsProperties.SocksProxy proxy = properties.socksProxy();
+        if (!proxy.enabled()) {
+            log.info("No SOCKS proxy configured; connecting to exchanges directly");
+            return;
+        }
+        if (restProxyType != Proxy.Type.SOCKS) {
+            throw new IllegalStateException("mds.socks-proxy is set but exchange REST calls would use proxy type "
+                    + restProxyType + "; rescu.properties must set rescu.http.readProxyType=SOCKS");
+        }
+        log.info("Routing all exchange connections through SOCKS5 proxy {}", proxy);
     }
 
     /**

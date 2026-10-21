@@ -74,6 +74,12 @@ com.mds
   `PatchedBitstampStreamingExchangeTest` fails once upstream is fixed; then remove the patch.
 - Kraken and Bitstamp streaming exchanges publish no instrument metadata; all pairs are subscribed.
 - Only one instance should run per InfluxDB bucket, or candles get overwritten.
+- **Outgoing traffic must honour `mds.socks-proxy`** (a security requirement where it's used).
+  Exchange connections get it from `MarketStreamManager.configure`; never add an HTTP client or
+  socket to an external host that bypasses it. `SocksProxyTest` runs every `SupportedExchange`
+  against a fake SOCKS5 server: a new exchange must pass it, and an XChange upgrade that breaks
+  it must not be merged. Don't delete `src/main/resources/rescu.properties` (it makes exchange
+  REST calls use SOCKS; startup fails closed without it).
 - `MarketStreamManager` and `CandleService` are `SmartLifecycle` beans; `CandleService` starts
   first and stops last so it recovers before the first tick and flushes after the last.
 

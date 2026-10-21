@@ -24,7 +24,7 @@ exchange WebSockets ──► MarketStreamManager ──► QuoteBook (latest qu
 | **JDK 17+** (21 recommended) | Runs Gradle | The build compiles with a **JDK 21 toolchain**; if none is installed Gradle downloads one automatically (Foojay resolver). macOS: `brew install openjdk@21`; elsewhere [Adoptium](https://adoptium.net). Set `JAVA_HOME` if `java` isn't on your `PATH`. |
 | **Docker** with Compose v2 | Runs InfluxDB 2.7 | Docker Desktop, or Docker Engine + the `docker compose` plugin. Not needed if you point the app at an existing InfluxDB. |
 | **Free ports** 8080 and 8086 | App and InfluxDB | Change the app port with `SERVER_PORT`. |
-| **Outbound internet** | Exchange WebSockets and metadata | Unreachable exchanges are skipped. Binance blocks the US; use `MDS_EXCHANGES=binanceus,kraken,…` there. |
+| **Outbound internet** | Exchange WebSockets and metadata | Direct, or through a SOCKS5 proxy ([Outgoing proxy](#outgoing-proxy-socks5)). Unreachable exchanges are skipped. Binance blocks the US; use `MDS_EXCHANGES=binanceus,kraken,…` there. |
 | `curl`, `bash` | Helper script | Preinstalled on macOS and most Linux distributions. |
 
 Gradle itself comes from the wrapper (`./gradlew`), so it doesn't need installing, and neither do the
@@ -166,6 +166,7 @@ returned as RFC 9457 problem details; pairs that aren't subscribed return 404.
 | `mds.stream.timeout` / `max-subscribers` | | `30m` / `1000` |
 | `mds.decimal.scale` / `.rounding` | `MDS_DECIMAL_SCALE` / `MDS_DECIMAL_ROUNDING` | `8` / `HALF_EVEN` |
 | `mds.ohlc.zone` / `.flush-interval` | `MDS_OHLC_ZONE` | `UTC` / `10s` |
+| `mds.socks-proxy.host` / `.port` | `MDS_SOCKS_PROXY_HOST` / `MDS_SOCKS_PROXY_PORT` | blank (direct) / `1080` |
 | `mds.influx.url` / `token` / `org` / `bucket` | `MDS_INFLUX_*` | `http://localhost:8086` / `mds-dev-token` / `mds` / `prices` |
 
 Each pair is subscribed on every exchange that lists it. Dropped sockets are reconnected by XChange;
@@ -185,6 +186,51 @@ entry in `SupportedExchange`.
   subscribed; unlisted ones simply never update.
 - `volume` is whatever each exchange's stream reports (mostly 24h base volume; KuCoin's is the last
   trade size), so VWAP is indicative.
+
+## Outgoing proxy (SOCKS5)
+
+Set `MDS_SOCKS_PROXY_HOST` (and `MDS_SOCKS_PROXY_PORT`, default `1080`) to send **every exchange
+connection** through a SOCKS5 proxy:
+
+- **WebSocket streams**, via XChange's streaming SOCKS settings;
+- **REST calls XChange makes while connecting** (instrument metadata, KuCoin's WebSocket token),
+  via rescu, whose proxy type is set to SOCKS in `src/main/resources/rescu.properties`.
+
+Host names are resolved **by the proxy** (SOCKS5 with domain names), so the app needs neither
+direct internet access nor public DNS. InfluxDB and inbound API traffic are not proxied.
+
+```bash
+MDS_SOCKS_PROXY_HOST=socks.internal MDS_SOCKS_PROXY_PORT=1080 scripts/dev.sh run
+```
+
+**Fail-closed:** with a proxy configured, startup is refused if exchange REST calls wouldn't use
+SOCKS (for example if `rescu.properties` was removed), and connections that fail through the
+proxy are retried through the proxy, never directly. `SocksProxyTest` checks on every build that
+each supported exchange talks SOCKS5 to the configured proxy when it connects. Verified end to
+end in a Docker network with no internet route or DNS except through a SOCKS5 relay: all five
+exchanges connected and streamed through the proxy; with the proxy setting removed, nothing
+connected; when the proxy was stopped and restarted, every exchange reconnected through it.
+
+Limitations:
+
+- **SOCKS5 only.** HTTP proxies (tinyproxy, Squid, …) aren't supported: XChange's WebSocket layer
+  only implements SOCKS5. Supporting an HTTP `CONNECT` proxy would mean patching XChange.
+- **No proxy authentication**, because XChange doesn't pass credentials to its SOCKS handler.
+- An exchange whose metadata can't be fetched at startup (proxy down) is skipped until restart;
+  WebSocket connections themselves retry indefinitely.
+
+Destinations the proxy must allow (all TCP 443), as observed with the default exchanges:
+
+| Exchange | Hosts |
+|---|---|
+| Binance | `api.binance.com`, `stream.binance.com` |
+| Kraken | `ws.kraken.com` |
+| Bitstamp | `ws.bitstamp.net` |
+| KuCoin | `api.kucoin.com`, `ws-api-spot.kucoin.com` |
+| Bitfinex | `api.bitfinex.com` |
+
+`scripts/dev.sh check` tests the proxy and reaches the exchanges through it when
+`MDS_SOCKS_PROXY_HOST` is set.
 
 ## OHLC candles
 
