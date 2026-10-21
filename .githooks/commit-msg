@@ -1,0 +1,141 @@
+#!/usr/bin/env bash
+#
+# commit-msg hook: rejects commit messages that semantic-release / commitlint would reject.
+# Install once per clone with `scripts/dev.sh hooks` (sets core.hooksPath to .githooks).
+#
+# Mirrors .commitlintrc.json (@commitlint/config-conventional plus this repo's rules) and reads
+# the allowed types and scopes from it, so that file stays the single source of truth.
+# Bypass in an emergency with `git commit --no-verify`; CI will still check.
+
+set -euo pipefail
+
+message_file="$1"
+root="$(git rev-parse --show-toplevel)"
+config="$root/.commitlintrc.json"
+max_length=100
+
+errors=()
+warnings=()
+error() { errors+=("$1"); }
+warning() { warnings+=("$1"); }
+
+# Values of a rule's array in .commitlintrc.json, e.g. "type-enum": [2, "always", ["feat", ...]]
+rule_values() {
+    tr -d '\n' < "$config" \
+        | sed -nE "s/.*\"$1\"[^]]*\\[([^]]*)\\].*/\\1/p" \
+        | tr -d '" ' | tr ',' ' '
+}
+
+[ -f "$config" ] || { echo "commit-msg: $config not found" >&2; exit 1; }
+types="$(rule_values type-enum)"
+scopes="$(rule_values scope-enum)"
+[ -n "$types" ] || { echo "commit-msg: could not read type-enum from $config" >&2; exit 1; }
+
+# Clean the message the way git will store it: drop everything below the scissors line
+# (git commit -v) and comment lines, then trailing blank lines.
+comment_char="$(git config --get core.commentChar || echo '#')"
+[ "$comment_char" = "auto" ] && comment_char="#"
+message="$(sed "/^$comment_char -\{24\} >8 -\{24\}\$/,\$d" "$message_file" \
+    | grep -v "^$comment_char" \
+    | sed -e :a -e '/^[[:space:]]*$/{$d;N;ba' -e '}' || true)"
+
+header="$(printf '%s\n' "$message" | sed -n '1p')"
+
+# Messages git and GitHub generate, which commitlint ignores by default
+if [[ "$header" =~ ^(Merge\ (pull\ request|branch|remote-tracking\ branch|tag)\ |Merge\ .+\ into\ |Revert\ \"|(fixup|squash|amend)!\ |Initial\ commit$|Automatic\ merge|Auto-merged\ ) ]]; then
+    exit 0
+fi
+
+if [ -z "$header" ]; then
+    error "the message is empty"
+fi
+
+# <type>(<scope>)!: <subject>
+header_pattern='^([A-Za-z]+)(\(([^)]*)\))?(!)?: (.*)$'
+if [[ "$header" =~ $header_pattern ]]; then
+    type="${BASH_REMATCH[1]}"
+    scope="${BASH_REMATCH[3]}"
+    has_scope="${BASH_REMATCH[2]}"
+    subject="${BASH_REMATCH[5]}"
+
+    case " $types " in
+        *" $type "*) ;;
+        *)
+            lower="$(printf '%s' "$type" | tr '[:upper:]' '[:lower:]')"
+            case " $types " in
+                *" $lower "*) error "type '$type' must be lower case: '$lower'" ;;
+                *) error "type '$type' is not one of: $types" ;;
+            esac
+            ;;
+    esac
+
+    if [ -n "$has_scope" ]; then
+        if [ -z "$scope" ]; then
+            error "scope is empty; remove the parentheses or name a scope"
+        elif ! [[ "$scope" =~ ^[a-z0-9]+(-[a-z0-9]+)*$ ]]; then
+            error "scope '$scope' must be kebab-case (lower case, words joined by '-')"
+        elif [ -n "$scopes" ]; then
+            case " $scopes " in
+                *" $scope "*) ;;
+                *) warning "scope '$scope' is not one of the suggested scopes: $scopes" ;;
+            esac
+        fi
+    fi
+
+    if [ -z "${subject// /}" ]; then
+        error "subject is empty: write what the commit does after '$type: '"
+    else
+        case "$subject" in
+            *.) error "subject must not end with a full stop" ;;
+        esac
+        # commitlint rejects any subject starting with a capital, acronyms included
+        if [[ "$subject" =~ ^[A-Z] ]]; then
+            error "subject must start with a lower-case letter; use an imperative verb, e.g. 'add OHLC candles' rather than '${subject%% *} …'"
+        elif [[ "$subject" =~ [A-Z] ]] && ! [[ "$subject" =~ [a-z] ]]; then
+            error "subject must not be all upper case"
+        fi
+    fi
+else
+    error "header must look like '<type>(<optional scope>): <subject>', e.g. 'fix(streaming): resubscribe when a stream ends'"
+fi
+
+if [ "${#header}" -gt "$max_length" ]; then
+    error "header is ${#header} characters; keep it within $max_length"
+fi
+
+# Body and footer
+line_number=0
+while IFS= read -r line || [ -n "$line" ]; do
+    line_number=$((line_number + 1))
+    [ "$line_number" -eq 1 ] && continue
+    if [ "$line_number" -eq 2 ] && [ -n "$line" ]; then
+        warning "leave a blank line between the header and the body"
+    fi
+    if [ "${#line}" -gt "$max_length" ]; then
+        error "line $line_number is ${#line} characters; wrap the body at $max_length"
+    fi
+    # semantic-release only recognises these exact spellings; anything else silently loses a major release
+    if [[ "$line" =~ ^[[:space:]]*[Bb][Rr][Ee][Aa][Kk][Ii][Nn][Gg][\ -][Cc][Hh][Aa][Nn][Gg][Ee][Ss]?[[:space:]]*:? ]] \
+            && ! [[ "$line" =~ ^BREAKING[\ -]CHANGES?:\ [^[:space:]] ]]; then
+        error "line $line_number: write breaking changes as 'BREAKING CHANGE: <description>' (upper case, colon, space)"
+    fi
+done <<< "$message"
+
+if [ "${#warnings[@]}" -gt 0 ]; then
+    for w in "${warnings[@]}"; do
+        printf '\033[33mwarning:\033[0m %s\n' "$w" >&2
+    done
+fi
+
+if [ "${#errors[@]}" -gt 0 ]; then
+    {
+        printf '\033[31mcommit rejected:\033[0m the message does not follow Conventional Commits\n\n'
+        printf '    %s\n\n' "$header"
+        for e in "${errors[@]}"; do
+            printf '  - %s\n' "$e"
+        done
+        printf '\nSee README "Commit messages". Your message is kept in .git/COMMIT_EDITMSG:\n'
+        printf "    git commit -e -F .git/COMMIT_EDITMSG\n"
+    } >&2
+    exit 1
+fi

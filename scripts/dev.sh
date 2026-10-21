@@ -9,6 +9,7 @@
 #   scripts/dev.sh test             run the test suite
 #   scripts/dev.sh stop             stop InfluxDB, keeping its data
 #   scripts/dev.sh reset [--yes]    stop InfluxDB and delete all of its data
+#   scripts/dev.sh hooks            install the git hooks in .githooks (commit message checks)
 #
 # Extra arguments to `run` are passed to Spring Boot, e.g.
 #   scripts/dev.sh run --mds.pairs=BTC/USDT --logging.level.com.mds=DEBUG
@@ -145,6 +146,12 @@ cmd_check() {
         esac
     done
 
+    if [ "$(git config --get core.hooksPath || true)" = ".githooks" ]; then
+        ok "git commit-message hook installed"
+    else
+        warn "git commit-message hook not installed; run 'scripts/dev.sh hooks'"
+    fi
+
     if [ "$missing" -ne 0 ]; then
         die "missing prerequisites, see above"
     fi
@@ -219,13 +226,20 @@ cmd_reset() {
     docker compose down --volumes
 }
 
+cmd_hooks() {
+    step "Installing git hooks from .githooks"
+    chmod +x .githooks/*
+    git config core.hooksPath .githooks
+    ok "commit messages are now checked against .commitlintrc.json on every commit"
+}
+
 cmd_test() {
     step "Running tests"
     exec ./gradlew test
 }
 
 usage() {
-    sed -n '3,19p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '3,20p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 command="${1:-help}"
@@ -238,6 +252,7 @@ case "$command" in
     stop)   cmd_stop ;;
     reset)  cmd_reset "$@" ;;
     test)   cmd_test ;;
+    hooks)  cmd_hooks ;;
     help|-h|--help) usage ;;
     *) usage; die "unknown command '$command'" ;;
 esac

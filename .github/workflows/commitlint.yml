@@ -1,0 +1,40 @@
+# Checks every pull request's commits and title against .commitlintrc.json.
+# The title matters most: PRs into main are squash-merged, so the title becomes the single commit
+# semantic-release reads. Also checks that .githooks/commit-msg still agrees with commitlint.
+name: commitlint
+
+on:
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
+
+permissions:
+  contents: read
+
+jobs:
+  commitlint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install commitlint
+        run: npm install --no-save --no-audit --no-fund @commitlint/cli@19.8.1 @commitlint/config-conventional@19.8.1
+
+      - name: Lint pull request title
+        env:
+          TITLE: ${{ github.event.pull_request.title }}
+        run: printf '%s\n' "$TITLE" | npx commitlint --verbose
+
+      - name: Lint commits
+        run: >-
+          npx commitlint --verbose
+          --from "${{ github.event.pull_request.base.sha }}"
+          --to "${{ github.event.pull_request.head.sha }}"
+
+      - name: Check the commit-msg hook agrees with commitlint
+        run: COMMITLINT="$PWD/node_modules/.bin/commitlint" scripts/test-commit-msg.sh
