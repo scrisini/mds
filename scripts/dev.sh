@@ -15,7 +15,8 @@
 #
 # Environment variables (all optional) are read by the app as usual, see README "Configuration".
 # Setting MDS_INFLUX_URL to anything other than http://localhost:8086 uses that InfluxDB instead
-# of starting the local container.
+# of starting the local container. With MDS_SOCKS_PROXY_HOST (and optionally MDS_SOCKS_PROXY_PORT)
+# set, `check` tests the proxy and reaches exchanges through it, as the app will.
 
 set -euo pipefail
 
@@ -26,6 +27,8 @@ APP_PORT="${SERVER_PORT:-8080}"
 LOCAL_INFLUX_URL="http://localhost:8086"
 INFLUX_URL="${MDS_INFLUX_URL:-$LOCAL_INFLUX_URL}"
 MIN_JAVA=17
+SOCKS_HOST="${MDS_SOCKS_PROXY_HOST:-}"
+SOCKS_PORT="${MDS_SOCKS_PROXY_PORT:-1080}"
 
 if [ -t 1 ]; then
     RED=$'\033[31m'; GREEN=$'\033[32m'; YELLOW=$'\033[33m'; BOLD=$'\033[1m'; RESET=$'\033[0m'
@@ -40,6 +43,15 @@ die()  { printf '%serror:%s %s\n' "$RED" "$RESET" "$*" >&2; exit 1; }
 step() { printf '%s==>%s %s\n' "$BOLD" "$RESET" "$*"; }
 
 uses_local_influx() { [ "$INFLUX_URL" = "$LOCAL_INFLUX_URL" ]; }
+
+# HTTP status of a GET to an exchange, through the SOCKS proxy when one is configured
+exchange_status() {
+    if [ -n "$SOCKS_HOST" ]; then
+        curl -s -o /dev/null -w '%{http_code}' --max-time 8 --socks5-hostname "$SOCKS_HOST:$SOCKS_PORT" "$1" || true
+    else
+        curl -s -o /dev/null -w '%{http_code}' --max-time 5 "$1" || true
+    fi
+}
 
 listening() { lsof -nP -iTCP:"$1" -sTCP:LISTEN >/dev/null 2>&1; }
 
@@ -109,13 +121,23 @@ cmd_check() {
         ok "port $APP_PORT available for the app"
     fi
 
+    if [ -n "$SOCKS_HOST" ]; then
+        if curl -s -o /dev/null --max-time 8 --socks5-hostname "$SOCKS_HOST:$SOCKS_PORT" \
+                https://api.kraken.com/0/public/Time; then
+            ok "SOCKS5 proxy $SOCKS_HOST:$SOCKS_PORT relays to the internet (all exchange traffic will use it)"
+        else
+            fail "SOCKS5 proxy $SOCKS_HOST:$SOCKS_PORT is not reachable or refuses connections"
+            missing=1
+        fi
+    fi
+
     # Exchange reachability is advisory: the app skips exchanges it cannot reach.
     local name url code
     for pair in "Binance|https://api.binance.com/api/v3/ping" \
                 "Kraken|https://api.kraken.com/0/public/Time" \
                 "Bitstamp|https://www.bitstamp.net/api/v2/ticker/btcusd/"; do
         name="${pair%%|*}"; url="${pair#*|}"
-        code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "$url" || true)"
+        code="$(exchange_status "$url")"
         case "$code" in
             200) ok "$name reachable" ;;
             451|403) warn "$name refused this location (HTTP $code); in the US use MDS_EXCHANGES with binanceus instead of binance" ;;

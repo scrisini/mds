@@ -20,6 +20,7 @@ import org.springframework.boot.context.properties.bind.DefaultValue;
  * @param stream            client SSE subscription settings
  * @param decimal           precision of all prices and volumes
  * @param ohlc              OHLC candle settings
+ * @param socksProxy        SOCKS5 proxy for all outgoing exchange traffic
  */
 @ConfigurationProperties("mds")
 public record MdsProperties(
@@ -31,7 +32,8 @@ public record MdsProperties(
         @DefaultValue Archive archive,
         @DefaultValue Stream stream,
         @DefaultValue DecimalSettings decimal,
-        @DefaultValue Ohlc ohlc) {
+        @DefaultValue Ohlc ohlc,
+        @DefaultValue SocksProxy socksProxy) {
 
     /**
      * @param enabled  whether snapshots of the live quotes are written to InfluxDB
@@ -76,5 +78,32 @@ public record MdsProperties(
     public record Ohlc(
             @DefaultValue("UTC") ZoneId zone,
             @DefaultValue("10s") Duration flushInterval) {
+    }
+
+    /**
+     * SOCKS5 proxy through which every exchange connection is made, both WebSocket streams and the
+     * REST calls XChange makes while connecting. Disabled when {@code host} is blank. InfluxDB
+     * traffic is not proxied. Proxy authentication is not supported.
+     *
+     * @param host proxy host name or IP; blank connects to exchanges directly
+     * @param port proxy port
+     */
+    public record SocksProxy(String host, @DefaultValue("1080") int port) {
+
+        public SocksProxy {
+            host = host == null ? "" : host.trim();
+            if (!host.isEmpty() && (port < 1 || port > 65535)) {
+                throw new IllegalArgumentException("mds.socks-proxy.port must be between 1 and 65535, was " + port);
+            }
+        }
+
+        public boolean enabled() {
+            return !host.isEmpty();
+        }
+
+        @Override
+        public String toString() {
+            return enabled() ? host + ":" + port : "none";
+        }
     }
 }
