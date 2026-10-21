@@ -30,9 +30,9 @@ expect() {
         failed=$((failed + 1))
         printf 'FAIL expected %s, got %s: %s\n%s\n\n' "$want" "$got" "$description" "$output"
     fi
-    if [ -n "${COMMITLINT:-}" ] && [ "${3:-}" != "${3#*hook-only}" ]; then
-        return # hook-only rule, commitlint differs by design
-    fi
+    case "$description" in
+        *hook-only*) return ;; # commitlint differs by design
+    esac
     if [ -n "${COMMITLINT:-}" ]; then
         local lint lint_dir
         # commitlint resolves "extends" next to its config, so lint from the directory holding
