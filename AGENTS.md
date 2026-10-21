@@ -16,11 +16,15 @@ OHLC candles, and archives everything in InfluxDB 2.x.
 ## Commands
 
 ```bash
-./gradlew test                 # all tests; must pass before committing
+./gradlew test                 # all tests (offline, no InfluxDB needed); must pass before committing
 ./gradlew compileJava          # fast compile check
-docker compose up -d           # InfluxDB on :8086 (org mds, bucket prices, token mds-dev-token)
-./gradlew bootRun              # app on :8080; needs InfluxDB and network access to exchanges
+scripts/dev.sh check           # verify local prerequisites (Java, Docker, ports, exchange reachability)
+scripts/dev.sh run [args...]   # start InfluxDB, then the app on :8080; args go to Spring Boot
+scripts/dev.sh status          # InfluxDB and app health
 ```
+
+See README "Running locally" for prerequisites and all `scripts/dev.sh` commands. Never run
+`scripts/dev.sh reset` unless asked: it deletes the local InfluxDB data.
 
 ## Layout
 
@@ -77,7 +81,7 @@ com.mds
 
 A developer may already be running `MdsApplication` from the IDE against the same InfluxDB.
 Check with `pgrep -fl com.mds.MdsApplication` first. Start your copy with a marker,
-`./gradlew bootRun --args='--mds.instance=agent'`, and stop only that one:
+`scripts/dev.sh run --mds.instance=agent`, and stop only that one:
 `pkill -f 'mds.instance=agent'`. Never kill processes by class name.
 
 ## Commits and releases

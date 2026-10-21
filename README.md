@@ -15,15 +15,95 @@ exchange WebSockets ──► MarketStreamManager ──► QuoteBook (latest qu
 
 **Stack:** Java 21 · Spring Boot 4.1 · Gradle 9 (wrapper) · XChange 6.0 (streaming) · InfluxDB 2.7 · Lombok
 
-## Run
+## Running locally
+
+### Prerequisites
+
+| Requirement | Why | Notes |
+|---|---|---|
+| **JDK 17+** (21 recommended) | Runs Gradle | The build compiles with a **JDK 21 toolchain**; if none is installed Gradle downloads one automatically (Foojay resolver). macOS: `brew install openjdk@21`; elsewhere [Adoptium](https://adoptium.net). Set `JAVA_HOME` if `java` isn't on your `PATH`. |
+| **Docker** with Compose v2 | Runs InfluxDB 2.7 | Docker Desktop, or Docker Engine + the `docker compose` plugin. Not needed if you point the app at an existing InfluxDB. |
+| **Free ports** 8080 and 8086 | App and InfluxDB | Change the app port with `SERVER_PORT`. |
+| **Outbound internet** | Exchange WebSockets and metadata | Unreachable exchanges are skipped. Binance blocks the US; use `MDS_EXCHANGES=binanceus,kraken,…` there. |
+| `curl`, `bash` | Helper script | Preinstalled on macOS and most Linux distributions. |
+
+Gradle itself comes from the wrapper (`./gradlew`), so it doesn't need installing, and neither do the
+dependencies (downloaded on first build, which needs a few minutes and internet access).
+
+### Quick start
 
 ```bash
-docker compose up -d     # InfluxDB on :8086 (org=mds, bucket=prices, token=mds-dev-token)
-./gradlew bootRun        # API on :8080
-./gradlew test
+scripts/dev.sh check     # verify the prerequisites above
+scripts/dev.sh run       # start InfluxDB, wait for it, then run the app (Ctrl-C to stop)
 ```
 
-InfluxDB UI: http://localhost:8086 (admin / admin-password).
+Then, in another terminal:
+
+```bash
+scripts/dev.sh status                                   # InfluxDB and app health
+curl localhost:8080/api/v1/exchanges                    # connection state per exchange
+curl localhost:8080/api/v1/prices/BTC-USDT              # live aggregate
+curl -N 'localhost:8080/api/v1/stream/prices/BTC-USDT?throttle=1s'
+```
+
+Exchanges connect within a few seconds of startup; until a pair's first update arrives its
+endpoints return 503. The InfluxDB UI is at http://localhost:8086 (user `admin`, password
+`admin-password`, org `mds`, bucket `prices`).
+
+### `scripts/dev.sh`
+
+| Command | What it does |
+|---|---|
+| `check` | Checks Java, Docker, free ports, and whether the exchanges are reachable from your network |
+| `infra` | Starts InfluxDB with Docker Compose and waits until it's healthy |
+| `run [args…]` | `check` + `infra`, then `./gradlew bootRun`; extra args go to Spring Boot |
+| `status` | Shows InfluxDB and app health |
+| `test` | Runs the test suite |
+| `stop` | Stops InfluxDB; data is kept in a Docker volume |
+| `reset [--yes]` | Removes the InfluxDB container **and deletes all stored data** (asks first unless `--yes`) |
+
+Settings can be passed as Spring arguments or environment variables (see [Configuration](#configuration)):
+
+```bash
+scripts/dev.sh run --mds.pairs=BTC/USDT,ETH/USDT --logging.level.com.mds=DEBUG
+MDS_EXCHANGES=kraken,bitstamp MDS_OHLC_ZONE=Australia/Sydney scripts/dev.sh run
+SERVER_PORT=9090 scripts/dev.sh run
+```
+
+To use an existing InfluxDB 2.x instead of the container, set its connection details; `dev.sh`
+then checks it's reachable and doesn't start Docker:
+
+```bash
+MDS_INFLUX_URL=https://influx.example.com MDS_INFLUX_TOKEN=… MDS_INFLUX_ORG=… MDS_INFLUX_BUCKET=… \
+  scripts/dev.sh run
+```
+
+### Without the script
+
+```bash
+docker compose up -d            # InfluxDB on :8086 (org=mds, bucket=prices, token=mds-dev-token)
+./gradlew bootRun               # API on :8080
+./gradlew test                  # tests (no InfluxDB or network needed)
+```
+
+Or build a jar and run it with any Java 21+ runtime:
+
+```bash
+./gradlew bootJar
+java -jar build/libs/mds-0.0.1-SNAPSHOT.jar
+```
+
+### Troubleshooting
+
+- **`port 8080 is in use`**: another copy of mds may be running (for example from your IDE). Stop
+  it or use `SERVER_PORT`. Run only one instance per InfluxDB bucket, or OHLC candles get overwritten.
+- **An exchange shows `connected: false` or is missing from `/api/v1/exchanges`**: the exchange
+  is unreachable or blocks your region; the log shows why. The others keep working.
+- **`InfluxDB did not become healthy`**: check `docker compose logs influxdb`. To start over with an
+  empty database, run `scripts/dev.sh reset`.
+- **Wrong InfluxDB token**: the container's admin token is only set when its volume is first
+  created. If you changed `DOCKER_INFLUXDB_INIT_ADMIN_TOKEN` in `docker-compose.yml`, run
+  `scripts/dev.sh reset` so it takes effect.
 
 ## REST API
 
