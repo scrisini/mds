@@ -166,8 +166,10 @@ A breaking-change footer, or `!` after the type (`feat!:`), triggers a major rel
 for any incompatible change to the REST/SSE/WebSocket API, configuration keys, log event codes or
 InfluxDB schema.
 
-- Spell the footer `BREAKING-CHANGE: ` or `BREAKING CHANGE: `; anything else is silently ignored
-  by semantic-release, and the hook rejects it.
+- Spell the footer `BREAKING-CHANGE: ` or `BREAKING CHANGE: ` (upper case, singular).
+  semantic-release matches those keywords in any case, with or without a colon, at the start of
+  any body line, and misses the plural; the hook rejects every other line that starts with
+  "breaking change", so reword such prose.
 - **The breaking-change footer goes last.** semantic-release takes everything from it to the end
   of the message as the release note, so any line after it (`Co-Authored-By`, `Refs`) ends up in
   the published notes. With trailers, write the hyphenated `BREAKING-CHANGE:` as the **last line

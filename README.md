@@ -481,9 +481,12 @@ BREAKING-CHANGE: <what breaks and how to migrate>   ← always the last line
 - Explain *why* the change was needed and anything non-obvious about *how*; the diff shows the
   rest. Wrap lines at 100 characters.
 - The breaking-change footer is spelled `BREAKING-CHANGE: ` or `BREAKING CHANGE: ` (upper case,
-  colon, space), at the start of a footer line, and should say how to migrate. semantic-release
-  ignores any other spelling (`breaking change:`, `BREAKING CHANGE` without a colon), so the major
-  release would silently not happen. The commit-msg hook rejects those spellings.
+  singular, colon, space), at the start of a footer line, and should say how to migrate.
+  semantic-release recognises only those two keywords (`.releaserc.json`), but it matches them
+  loosely: in any case, with a colon or just a space, at the start of **any** body line. So the
+  plural `BREAKING CHANGES:` silently loses the major release, while a prose line such as
+  "Breaking change avoided by…" silently causes one. The commit-msg hook rejects both: only the
+  two exact footers may start a line with "breaking change".
 - **The breaking-change footer goes last.** semantic-release takes everything from it to the end
   of the message as the release note, so a `Co-Authored-By` or `Refs` line after it would be
   published in the notes. With trailers, write the hyphenated `BREAKING-CHANGE:` as the **last
@@ -516,8 +519,8 @@ scripts/dev.sh hooks        # sets git config core.hooksPath to .githooks
 
 It reads the allowed types and scopes from `.commitlintrc.json`, ignores comment lines and the
 `git commit -v` diff, and lets git's own merge, revert, `fixup!` and `squash!` messages through.
-It is slightly stricter than commitlint where that protects releases (misspelt
-`BREAKING CHANGE` footers, empty scopes). A rejected message is kept, so you can fix it with
+It is slightly stricter than commitlint where that protects releases (misspelt or plural
+breaking-change footers, prose lines that start with "breaking change", empty scopes). A rejected message is kept, so you can fix it with
 `git commit -e -F .git/COMMIT_EDITMSG`. It also runs for commits made from IntelliJ and other
 IDEs that use git's hooks.
 
