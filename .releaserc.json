@@ -21,7 +21,7 @@
           { "type": "style", "release": false }
         ],
         "parserOpts": {
-          "noteKeywords": ["BREAKING CHANGE", "BREAKING CHANGES", "BREAKING"]
+          "noteKeywords": ["BREAKING CHANGE", "BREAKING CHANGES", "BREAKING-CHANGE", "BREAKING"]
         }
       }
     ],
