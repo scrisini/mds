@@ -11,11 +11,14 @@ import java.util.List;
 import java.util.Map;
 
 import com.mds.exchange.MarketStreamManager;
+import org.junit.jupiter.api.AfterAll;
+import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.boot.test.system.CapturedOutput;
 import org.springframework.boot.test.system.OutputCaptureExtension;
+import org.springframework.boot.logging.LoggingSystem;
 import org.springframework.boot.test.web.server.LocalServerPort;
 import org.springframework.context.annotation.Import;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
@@ -51,6 +54,25 @@ class StructuredLoggingTest {
     @LocalServerPort
     private int port;
 
+    /**
+     * Spring Boot configures logging once per JVM, so a context another test class started first
+     * would leave text logging in place for this one. Resetting the logging system makes this
+     * context configure it as ECS JSON, and afterwards lets the next context configure its own.
+     */
+    @BeforeAll
+    static void reconfigureLoggingForThisContext() {
+        resetLogging();
+    }
+
+    @AfterAll
+    static void reconfigureLoggingForTheNextContext() {
+        resetLogging();
+    }
+
+    private static void resetLogging() {
+        LoggingSystem.get(StructuredLoggingTest.class.getClassLoader()).cleanUp();
+    }
+
     @MockitoBean
     private MarketStreamManager streams;
 
@@ -62,8 +84,11 @@ class StructuredLoggingTest {
         assertThat(response.headers().firstValue(RequestIds.HEADER)).contains("support-ticket-7");
         assertThat(JSON.readValue(response.body(), Map.class)).containsEntry("requestId", "support-ticket-7");
 
+        // The test framework logs while bootstrapping, before this context configures logging;
+        // from the application's first line on, every line must be JSON
         List<Map<String, Object>> lines = output.getOut().lines()
                 .filter(line -> !line.isBlank())
+                .dropWhile(line -> !line.startsWith("{"))
                 .map(StructuredLoggingTest::parseFlattened)
                 .toList();
 
