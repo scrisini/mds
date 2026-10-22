@@ -1,5 +1,6 @@
 package com.mds.config;
 
+import com.mds.logging.LogEvent;
 import com.mds.math.Decimal;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.context.annotation.Configuration;
@@ -15,6 +16,7 @@ public class DecimalConfig {
     public DecimalConfig(MdsProperties properties) {
         MdsProperties.DecimalSettings settings = properties.decimal();
         Decimal.configure(settings.scale(), settings.rounding());
-        log.info("Decimal precision: scale {}, {}, range ±{}", settings.scale(), settings.rounding(), Decimal.max());
+        LogEvent.DECIMAL_PRECISION.at(log).with("scale", settings.scale()).with("rounding", settings.rounding())
+                .with("max", Decimal.max()).log();
     }
 }

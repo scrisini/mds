@@ -1,0 +1,63 @@
+# Publishes a release on every push to main (the squash of a release PR from develop).
+# semantic-release reads the commits since the last tag, picks the version from .releaserc.json,
+# then creates the vX.Y.Z tag and a GitHub release with notes. The first release is v1.0.0.
+# The tests run first: nothing is released from a red build.
+name: release
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+# Releases must not overlap: two runs could compute the same version.
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - uses: gradle/actions/setup-gradle@v6
+
+      - name: Run tests
+        run: ./gradlew test
+
+  release:
+    needs: test
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write       # push the tag and create the GitHub release
+      issues: write         # comment on issues resolved by the release
+      pull-requests: write  # comment on pull requests included in the release
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0              # semantic-release needs every commit and tag
+          persist-credentials: false  # it authenticates with GITHUB_TOKEN itself
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+
+      # The preset's major must match the conventional-changelog-writer that semantic-release bundles:
+      # semantic-release 25 ships writer 8, which needs preset 9.x (10.x requires writer 9 and fails
+      # in generateNotes). Upgrade the two together and check with a --dry-run first.
+      - name: Install semantic-release
+        run: >-
+          npm install --no-save --no-audit --no-fund
+          semantic-release@25.0.9 conventional-changelog-conventionalcommits@9.3.1
+
+      - name: Release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: npx semantic-release

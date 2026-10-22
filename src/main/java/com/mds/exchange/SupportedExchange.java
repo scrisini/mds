@@ -1,6 +1,7 @@
 package com.mds.exchange;
 
 import java.util.Arrays;
+import java.util.List;
 import java.util.Optional;
 
 import info.bitrich.xchangestream.binance.BinanceStreamingExchange;
@@ -45,6 +46,11 @@ public enum SupportedExchange {
     /** Whether the trade stream must also be subscribed to obtain a last price. */
     public boolean lastPriceFromTrades() {
         return lastPriceFromTrades;
+    }
+
+    /** Every supported id, in declaration order. */
+    public static List<String> ids() {
+        return Arrays.stream(values()).map(SupportedExchange::id).toList();
     }
 
     public static Optional<SupportedExchange> fromId(String id) {

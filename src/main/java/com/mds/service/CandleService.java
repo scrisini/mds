@@ -16,6 +16,7 @@ import java.util.concurrent.ConcurrentLinkedQueue;
 import static java.util.stream.Collectors.toSet;
 
 import com.mds.config.MdsProperties;
+import com.mds.logging.LogEvent;
 import com.mds.math.Decimal;
 import com.mds.model.Candle;
 import com.mds.model.CandlePeriod;
@@ -94,8 +95,8 @@ public class CandleService implements SmartLifecycle {
     public void start() {
         recover();
         subscription = quoteBook.updates().subscribe(this::onUpdate,
-                e -> log.error("Candle updates stopped", e));
-        log.info("Building day/week/month/year candles (zone {}) for the index and each exchange", zone);
+                e -> LogEvent.CANDLE_UPDATES_STOPPED.at(log).cause(e).log());
+        LogEvent.CANDLES_STARTED.at(log).with("zone", zone).log();
     }
 
     @Override
@@ -197,11 +198,11 @@ public class CandleService implements SmartLifecycle {
         try {
             repository.saveCandles(batch);
             if (!finished.isEmpty()) {
-                log.info("Completed {} candles", finished.size());
+                LogEvent.CANDLES_COMPLETED.at(log).with("count", finished.size()).log();
             }
         } catch (RuntimeException e) {
             completed.addAll(finished);
-            log.warn("Failed to write {} candles to InfluxDB, retrying next flush: {}", batch.size(), e.getMessage());
+            LogEvent.CANDLE_WRITE_FAILED.at(log).with("count", batch.size()).with("reason", e.getMessage()).log();
         }
     }
 
@@ -217,7 +218,7 @@ public class CandleService implements SmartLifecycle {
         try {
             stored = repository.findLatestCandles(since);
         } catch (RuntimeException e) {
-            log.warn("Could not reload candles from InfluxDB, starting fresh: {}", e.getMessage());
+            LogEvent.CANDLE_RELOAD_FAILED.at(log).cause(e).log();
             return;
         }
         int resumed = 0;
@@ -238,8 +239,8 @@ public class CandleService implements SmartLifecycle {
                 resumed++;
             }
         }
-        log.info("Recovered {} candle series; {} candles to complete or back-fill", resumed,
-                completed.size() - before);
+        LogEvent.CANDLES_RECOVERED.at(log).with("series", resumed)
+                .with("backfill_count", completed.size() - before).log();
     }
 
     // ---- queries ----

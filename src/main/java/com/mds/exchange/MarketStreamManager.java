@@ -9,6 +9,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 
 import com.mds.config.MdsProperties;
+import com.mds.logging.LogEvent;
 import com.mds.model.ExchangeStatus;
 import com.mds.model.MarketPair;
 import com.mds.service.QuoteBook;
@@ -73,10 +74,11 @@ public class MarketStreamManager implements SmartLifecycle {
                             attach(supported.id(), exchange, listedPairs(supported.id(), exchange, pairs),
                                     supported.lastPriceFromTrades());
                         } catch (RuntimeException e) {
-                            log.error("Could not start streaming from {}", supported.id(), e);
+                            LogEvent.EXCHANGE_START_FAILED.at(log).with("exchange", supported.id()).cause(e).log();
                         }
                     }),
-                    () -> log.warn("Ignoring unsupported exchange '{}'", id));
+                    () -> LogEvent.EXCHANGE_UNSUPPORTED.at(log).with("exchange", id)
+                            .with("supported", SupportedExchange.ids()).log());
         }
         running = true;
     }
@@ -102,7 +104,7 @@ public class MarketStreamManager implements SmartLifecycle {
     /** Connects and subscribes asynchronously; returns immediately. */
     void attach(String id, StreamingExchange exchange, List<MarketPair> pairs, boolean lastPriceFromTrades) {
         if (pairs.isEmpty()) {
-            log.warn("{} lists none of the configured pairs; not connecting", id);
+            LogEvent.EXCHANGE_NO_CONFIGURED_PAIRS.at(log).with("exchange", id).log();
             return;
         }
         connections.put(id, new Connection(exchange, pairs));
@@ -117,11 +119,12 @@ public class MarketStreamManager implements SmartLifecycle {
 
         ProductSubscription products = subscription.build();
         subscriptions.add(Completable.defer(() -> exchange.connect(products))
-                .doOnError(e -> log.warn("Connecting to {} failed, retrying in {}: {}", id, delay(), e.getMessage()))
+                .doOnError(e -> LogEvent.EXCHANGE_CONNECT_FAILED.at(log).with("exchange", id)
+                        .with("retry_in", delay()).with("reason", e.getMessage()).log())
                 .retryWhen(errors -> errors.delay(delay().toMillis(), TimeUnit.MILLISECONDS))
                 .subscribe(
                         () -> subscribe(id, exchange, pairs, lastPriceFromTrades),
-                        e -> log.error("Giving up on {}", id, e)));
+                        e -> LogEvent.EXCHANGE_GAVE_UP.at(log).with("exchange", id).cause(e).log()));
     }
 
     public List<String> ids() {
@@ -154,7 +157,7 @@ public class MarketStreamManager implements SmartLifecycle {
     // Bitstamp, KuCoin and Bitfinex only implement those overloads.
     @SuppressWarnings("deprecation")
     private void subscribe(String id, StreamingExchange exchange, List<MarketPair> pairs, boolean lastPriceFromTrades) {
-        log.info("Connected to {}, streaming {}", id, pairs);
+        LogEvent.EXCHANGE_CONNECTED.at(log).with("exchange", id).with("pairs", pairs).log();
         StreamingMarketDataService marketData = exchange.getStreamingMarketDataService();
         for (MarketPair pair : pairs) {
             CurrencyPair currencyPair = pair.toCurrencyPair();
@@ -171,10 +174,11 @@ public class MarketStreamManager implements SmartLifecycle {
     private <T> Observable<T> resilient(String id, MarketPair pair, String channel,
                                         Supplier<Observable<T>> stream) {
         return Observable.defer(stream)
-                .doOnError(e -> log.warn("{} {} {} stream failed, resubscribing in {}: {}",
-                        id, pair, channel, delay(), e.getMessage()))
+                .doOnError(e -> LogEvent.EXCHANGE_STREAM_FAILED.at(log).with("exchange", id).with("pair", pair)
+                        .with("channel", channel).with("retry_in", delay()).with("reason", e.getMessage()).log())
                 .retryWhen(errors -> errors.delay(delay().toMillis(), TimeUnit.MILLISECONDS))
-                .doOnComplete(() -> log.warn("{} {} {} stream ended, resubscribing in {}", id, pair, channel, delay()))
+                .doOnComplete(() -> LogEvent.EXCHANGE_STREAM_ENDED.at(log).with("exchange", id).with("pair", pair)
+                        .with("channel", channel).with("retry_in", delay()).log())
                 .repeatWhen(completions -> completions.delay(delay().toMillis(), TimeUnit.MILLISECONDS));
     }
 
@@ -187,7 +191,7 @@ public class MarketStreamManager implements SmartLifecycle {
             exchange.applySpecification(spec);
             return Optional.of(exchange);
         } catch (RuntimeException e) {
-            log.warn("Could not initialise exchange '{}': {}", supported.id(), e.getMessage());
+            LogEvent.EXCHANGE_INIT_FAILED.at(log).with("exchange", supported.id()).cause(e).log();
             return Optional.empty();
         }
     }
@@ -215,14 +219,14 @@ public class MarketStreamManager implements SmartLifecycle {
     void verifyProxySupport(Proxy.Type restProxyType) {
         MdsProperties.SocksProxy proxy = properties.socksProxy();
         if (!proxy.enabled()) {
-            log.info("No SOCKS proxy configured; connecting to exchanges directly");
+            LogEvent.EXCHANGE_PROXY_DISABLED.at(log).log();
             return;
         }
         if (restProxyType != Proxy.Type.SOCKS) {
             throw new IllegalStateException("mds.socks-proxy is set but exchange REST calls would use proxy type "
                     + restProxyType + "; rescu.properties must set rescu.http.readProxyType=SOCKS");
         }
-        log.info("Routing all exchange connections through SOCKS5 proxy {}", proxy);
+        LogEvent.EXCHANGE_PROXY_ENABLED.at(log).with("proxy", proxy).log();
     }
 
     /**
@@ -232,7 +236,7 @@ public class MarketStreamManager implements SmartLifecycle {
     private static List<MarketPair> listedPairs(String id, StreamingExchange exchange, List<MarketPair> pairs) {
         List<Instrument> listed = instruments(exchange);
         if (listed.isEmpty()) {
-            log.info("{} provides no instrument list; subscribing to all configured pairs", id);
+            LogEvent.EXCHANGE_NO_INSTRUMENT_LIST.at(log).with("exchange", id).log();
             return pairs;
         }
         return pairs.stream().filter(p -> listed.contains(p.toCurrencyPair())).toList();
