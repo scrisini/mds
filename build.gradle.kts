@@ -23,6 +23,7 @@ val influxClientVersion = "8.0.0"
 
 dependencies {
     implementation("org.springframework.boot:spring-boot-starter-webmvc")
+    implementation("org.springframework.boot:spring-boot-starter-websocket")
     implementation("org.springframework.boot:spring-boot-starter-actuator")
 
     // Exchange connectivity (WebSocket streams; each pulls in its REST module for metadata)

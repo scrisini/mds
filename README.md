@@ -8,7 +8,8 @@ serves it over REST, and archives snapshots in InfluxDB 2.x for later retrieval.
 exchange WebSockets ──► MarketStreamManager ──► QuoteBook (latest quote per exchange/pair)
                                                    │
                         REST /api/v1/prices ◄──────┤  aggregated on each request
-                        SSE /api/v1/stream ◄───────┤  pushed on change, throttled per client
+                        SSE /api/v1/stream ◄───────┤  pushed on change, at each client's rate
+                        WebSocket /api/v1/ws ◄─────┤  several pairs per socket, rate per pair
                         CandleService ◄────────────┤  OHLC per tick ──► InfluxDB (every 10s + at midnight)
                         PriceArchiver (every 5s) ◄─┘──► InfluxDB ──► REST /api/v1/history
 ```
@@ -117,7 +118,8 @@ java -jar build/libs/mds-0.0.1-SNAPSHOT.jar
 | POST | `/api/v1/prices/archive` | Archive a snapshot now |
 | GET | `/api/v1/history/{pair}` | Archived aggregates |
 | GET | `/api/v1/history/{pair}/tickers` | Archived per-exchange tickers; optional `exchange=` |
-| GET | `/api/v1/stream/prices/{pair}?throttle=1s` | Server-Sent Events stream of live aggregates |
+| GET | `/api/v1/stream/prices/{pair}?rate=2` | Server-Sent Events stream of live aggregates |
+| WS | `/api/v1/ws/prices` | WebSocket: subscribe to several pairs, each at its own rate |
 | GET | `/api/v1/candles/{pair}?period=day&source=index` | Stored OHLC candles (`day`, `week`, `month`, `year`), oldest first |
 | GET | `/api/v1/candles/{pair}/current?source=index` | Live in-progress candles for every period |
 | GET | `/actuator/health` | Includes `influx` and `streams` (up while any exchange is connected) checks |
@@ -127,20 +129,76 @@ averages rows into buckets) and `limit` (default 1000, max 10000).
 
 Logging uses Lombok's `@Slf4j`.
 
-### Streaming subscriptions
+### Real-time subscriptions: rates
 
-`GET /api/v1/stream/prices/{pair}` opens a Server-Sent Events stream. Each event is named `price`,
-has an increasing `id`, and carries the same JSON as `/api/v1/prices/{pair}`. The first event is
-sent immediately; after that a client receives at most one event per `throttle` interval, always
-the latest state, and nothing while prices are unchanged. A slow client gets the newest aggregate
-when it catches up, never a backlog.
+Real-time clients can use **Server-Sent Events** (one pair per connection) or **WebSocket**
+(several pairs over one connection). Both push the same aggregate JSON as `/api/v1/prices/{pair}`,
+and both take a **rate**:
 
-`throttle` accepts `250ms`, `2s`, `PT1S`, … between `mds.stream.min-throttle` and
-`max-throttle` (default `1s`). Connections close after `mds.stream.timeout` (EventSource clients
-reconnect automatically); beyond `mds.stream.max-subscribers` new subscriptions get 503.
+| Rate | Delivery |
+|---|---|
+| `1`, `2`, `3` … `10` | at most that many updates per second, always the latest state |
+| `unlimited` | every change to the aggregate, unthrottled |
+| *(none)* | `mds.stream.default-throttle`, 1 per second |
+
+The current aggregate is sent as soon as a subscription opens, and nothing is sent while prices
+don't change. Whatever the rate, a client that can't keep up gets the newest aggregate when it
+catches up, never a backlog. The highest whole rate follows `mds.stream.min-throttle` (100ms, so
+10/s). `rate=unlimited` can be turned off with `mds.stream.allow-unthrottled=false`. Instead of a
+rate you can give `throttle`, a minimum interval (`250ms`, `1.5s`, `PT2S`), but not both.
+Beyond `mds.stream.max-subscribers` subscriptions (SSE connections plus WebSocket pairs), new ones
+get 503.
+
+For scale: in testing an unthrottled BTC-USD subscription delivered about 11 updates per second,
+because that's how often the cross-exchange aggregate changed.
+
+### Server-Sent Events
 
 ```bash
-curl -N 'localhost:8080/api/v1/stream/prices/BTC-USDT?throttle=500ms'
+curl -N 'localhost:8080/api/v1/stream/prices/BTC-USDT?rate=2'
+curl -N 'localhost:8080/api/v1/stream/prices/ETH-USD?rate=unlimited'
+```
+
+Each event is named `price`, has an increasing `id`, and carries an aggregate. Connections close
+after `mds.stream.timeout` (EventSource clients reconnect automatically). Invalid rates get 400.
+
+### WebSocket
+
+Connect to `ws://localhost:8080/api/v1/ws/prices` and send JSON commands:
+
+```jsonc
+→ {"action": "subscribe",   "pair": "BTC-USDT", "rate": 2}
+→ {"action": "subscribe",   "pair": "ETH-USD",  "rate": "unlimited"}
+→ {"action": "subscribe",   "pair": "BTC-USD",  "throttle": "500ms"}
+→ {"action": "unsubscribe", "pair": "BTC-USDT"}
+
+← {"type": "subscribed",   "pair": "BTC-USDT", "rate": "2/s"}
+← {"type": "price",        "pair": "BTC-USDT", "seq": 1, "data": { …aggregate… }}
+← {"type": "unsubscribed", "pair": "BTC-USDT"}
+← {"type": "error",        "status": 400, "message": "rate must be between 1 and 10 updates per second, or 'unlimited'"}
+```
+
+- Each pair has its own rate. Subscribing to a pair again replaces its rate.
+- `seq` counts price messages per pair, from 1.
+- Errors (400 invalid command, 404 pair not streamed or not subscribed, 503 server full) leave the
+  socket open.
+- The current price is sent as soon as a subscription opens, so a `price` message can arrive just
+  before its `subscribed` acknowledgement.
+- A client that stops reading is disconnected with close code 1008 once 512 KB of messages are
+  waiting, instead of the server buffering without limit.
+- Browsers may connect only from `mds.stream.allowed-origins` (default `*`). Non-browser clients
+  aren't affected.
+- Idle sockets close after `mds.stream.timeout`.
+
+From a browser or Node 22+:
+
+```js
+const ws = new WebSocket('ws://localhost:8080/api/v1/ws/prices');
+ws.onopen = () => ws.send(JSON.stringify({ action: 'subscribe', pair: 'BTC-USDT', rate: 2 }));
+ws.onmessage = (e) => console.log(JSON.parse(e.data));
+```
+
+```bash
 curl localhost:8080/api/v1/prices/BTC-USDT
 curl 'localhost:8080/api/v1/history/ETH-USD/tickers?exchange=kraken&window=5m&from=2026-10-21T00:00:00Z'
 ```
@@ -162,8 +220,10 @@ returned as RFC 9457 problem details; pairs that aren't subscribed return 404.
 | `mds.reconnect-delay` | | `5s` before retrying a failed connection or stream |
 | `mds.stale-after` | | `60s`; older quotes are excluded from aggregates |
 | `mds.archive.enabled` / `.interval` | `MDS_ARCHIVE_INTERVAL` | `true` / `5s` |
-| `mds.stream.default-throttle` / `min-throttle` / `max-throttle` | | `1s` / `100ms` / `60s` |
+| `mds.stream.default-throttle` / `min-throttle` / `max-throttle` | | `1s` / `100ms` (caps `rate` at 10/s) / `60s` |
 | `mds.stream.timeout` / `max-subscribers` | | `30m` / `1000` |
+| `mds.stream.allow-unthrottled` | `MDS_STREAM_ALLOW_UNTHROTTLED` | `true` (permits `rate=unlimited`) |
+| `mds.stream.allowed-origins` | `MDS_STREAM_ALLOWED_ORIGINS` | `*` (browser origins for WebSocket) |
 | `mds.decimal.scale` / `.rounding` | `MDS_DECIMAL_SCALE` / `MDS_DECIMAL_ROUNDING` | `8` / `HALF_EVEN` |
 | `mds.ohlc.zone` / `.flush-interval` | `MDS_OHLC_ZONE` | `UTC` / `10s` |
 | `mds.socks-proxy.host` / `.port` | `MDS_SOCKS_PROXY_HOST` / `MDS_SOCKS_PROXY_PORT` | blank (direct) / `1080` |
@@ -302,15 +362,16 @@ Micrometer meters, visible at `/actuator/metrics/{name}` and tagged `application
 | `mds.influx.points` | counter | `measurement` |
 | `mds.influx.query` | timer, p50/p95/p99 | `measurement`, `outcome` |
 | `mds.influx.query.rows` | distribution | `measurement` |
-| `mds.stream.subscribers` | gauge | |
-| `mds.stream.events` | counter | `pair` |
+| `mds.stream.subscribers` | gauge | `transport` (`sse`/`websocket`) |
+| `mds.stream.events` | counter | `pair`, `transport` |
 
 ```bash
 curl 'localhost:8080/actuator/metrics/http.server.requests?tag=uri:/api/v1/prices/{pair}'
 curl 'localhost:8080/actuator/metrics/mds.influx.write?tag=outcome:error'
 ```
 
-For SSE requests `http.server.requests` measures the whole connection.
+For SSE requests `http.server.requests` measures the whole connection; WebSocket traffic isn't
+in `http.server.requests`, so use `mds.stream.*` for it.
 
 ## InfluxDB schema
 
@@ -334,9 +395,9 @@ com.mds
 ├── math/          Decimal (fixed-point) and its JSON serializer
 ├── model/         MarketPair, PriceQuote, AggregatedPrice, Candle, CandlePeriod, ExchangeStatus, history rows
 ├── service/       QuoteBook (live quotes), PriceService, PriceAggregator, PriceArchiver (@Scheduled),
-│                  PriceStreamService (SSE + throttling), CandleService (OHLC)
+│                  PriceStreamService (SSE/WebSocket subscriptions + rates), CandleService (OHLC)
 ├── persistence/   PriceRepository (Flux queries), InfluxHealthIndicator
-└── web/           REST controllers, ApiExceptionHandler
+└── web/           REST and SSE controllers, PriceWebSocketHandler, ApiExceptionHandler
 ```
 
 ## Contributing
