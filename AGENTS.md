@@ -6,7 +6,7 @@ the user-facing API, configuration and InfluxDB schema.
 ## Project
 
 `mds` is a Spring Boot service that streams crypto tickers over WebSocket from several exchanges
-(XChange `xchange-stream-*`), aggregates them per pair, serves REST and Server-Sent Events, builds
+(XChange `xchange-stream-*`), aggregates them per pair, serves REST, Server-Sent Events and a client WebSocket, builds
 OHLC candles, and archives everything in InfluxDB 2.x.
 
 - Java 21 (Gradle toolchain), Spring Boot 4.1, Gradle 9 via the wrapper, Lombok
@@ -38,7 +38,7 @@ com.mds
 ├── model/        immutable records: MarketPair, PriceQuote, AggregatedPrice, Candle, …
 ├── service/      QuoteBook, PriceService, PriceAggregator, PriceArchiver, PriceStreamService, CandleService
 ├── persistence/  PriceRepository (all InfluxDB reads/writes), InfluxHealthIndicator
-└── web/          REST/SSE controllers, ApiExceptionHandler (RFC 9457 problem details)
+└── web/          REST/SSE controllers, PriceWebSocketHandler, ApiExceptionHandler (RFC 9457 problem details)
 ```
 
 ## Conventions
@@ -76,6 +76,11 @@ com.mds
   `PatchedBitstampStreamingExchangeTest` fails once upstream is fixed; then remove the patch.
 - Kraken and Bitstamp streaming exchanges publish no instrument metadata; all pairs are subscribed.
 - Only one instance should run per InfluxDB bucket, or candles get overwritten.
+- Real-time clients (SSE and the `/api/v1/ws/prices` WebSocket) both go through
+  `PriceStreamService.open`, which owns rates (`StreamRate`), the subscriber limit, metrics and
+  slow-client handling. Add new transports there rather than re-implementing throttling.
+  `WebSocketSession` isn't thread-safe: send only through the `ConcurrentWebSocketSessionDecorator`
+  in `PriceWebSocketHandler`.
 - **Outgoing traffic must honour `mds.socks-proxy`** (a security requirement where it's used).
   Exchange connections get it from `MarketStreamManager.configure`; never add an HTTP client or
   socket to an external host that bypasses it. `SocksProxyTest` runs every `SupportedExchange`

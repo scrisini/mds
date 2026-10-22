@@ -45,18 +45,25 @@ public record MdsProperties(
     }
 
     /**
-     * @param defaultThrottle minimum time between events when the client doesn't ask for one
-     * @param minThrottle     lowest throttle a client may request
-     * @param maxThrottle     highest throttle a client may request
-     * @param timeout         connection lifetime, after which clients reconnect
-     * @param maxSubscribers  concurrent subscriptions allowed across all clients
+     * Real-time price subscriptions over Server-Sent Events and WebSocket.
+     *
+     * @param defaultThrottle  minimum time between events when the client doesn't ask for a rate
+     * @param minThrottle      shortest interval a client may request; also caps {@code rate} (100ms = 10/s)
+     * @param maxThrottle      longest interval a client may request
+     * @param timeout          SSE connection lifetime, and WebSocket idle timeout
+     * @param maxSubscribers   concurrent subscriptions across all clients (an SSE connection, or one
+     *                         pair on a WebSocket)
+     * @param allowUnthrottled whether clients may request {@code rate=unlimited}
+     * @param allowedOrigins   browser origins allowed to open WebSockets ({@code *} for any)
      */
     public record Stream(
             @DefaultValue("1s") Duration defaultThrottle,
             @DefaultValue("100ms") Duration minThrottle,
             @DefaultValue("60s") Duration maxThrottle,
             @DefaultValue("30m") Duration timeout,
-            @DefaultValue("1000") int maxSubscribers) {
+            @DefaultValue("1000") int maxSubscribers,
+            @DefaultValue("true") boolean allowUnthrottled,
+            @DefaultValue("*") List<String> allowedOrigins) {
     }
 
     /**

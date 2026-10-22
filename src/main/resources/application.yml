@@ -17,12 +17,15 @@ mds:
   archive:
     enabled: true
     interval: ${MDS_ARCHIVE_INTERVAL:5s}
+  # Real-time subscriptions (SSE and WebSocket)
   stream:
-    default-throttle: 1s
-    min-throttle: 100ms
+    default-throttle: 1s        # when a client asks for no rate
+    min-throttle: 100ms         # also caps rate=N at 10 updates per second
     max-throttle: 60s
-    timeout: 30m
-    max-subscribers: 1000
+    timeout: 30m                # SSE connection lifetime; WebSocket idle timeout
+    max-subscribers: 1000       # SSE connections + WebSocket pair subscriptions
+    allow-unthrottled: ${MDS_STREAM_ALLOW_UNTHROTTLED:true}   # permit rate=unlimited
+    allowed-origins: ${MDS_STREAM_ALLOWED_ORIGINS:*}          # browser origins allowed to open WebSockets
   ohlc:
     # midnight in this zone starts each day/week (Monday)/month/year candle
     zone: ${MDS_OHLC_ZONE:UTC}
