@@ -13,6 +13,8 @@
 #              commitlint check must pass
 #   - develop: pull requests only, merge commits only (no squash or rebase), no force-push or
 #              deletion, commitlint check must pass
+#   The commitlint check isn't required when a branch is first created (a new branch can't have
+#   passed it yet); it is required for every pull request.
 #
 # Re-running updates the existing rulesets (matched by name). Requires the GitHub CLI (gh),
 # authenticated with admin rights on the repository.
@@ -28,7 +30,7 @@ for arg in "$@"; do
     case "$arg" in
         --apply) apply=true ;;
         --create-develop) create_develop=true ;;
-        -h|--help) sed -n '3,22p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h|--help) sed -n '3,24p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) echo "unknown option: $arg" >&2; exit 1 ;;
     esac
 done
@@ -77,6 +79,7 @@ ruleset() {
     {
       "type": "required_status_checks",
       "parameters": {
+        "do_not_enforce_on_create": true,
         "strict_required_status_checks_policy": false,
         "required_status_checks": [{ "context": "$CHECK" }]
       }
@@ -123,6 +126,10 @@ echo "Applying branch policy to $repo"
 printf '%s' "$repository_settings" | gh api -X PATCH "repos/$repo" --input - >/dev/null
 echo "updated repository merge settings"
 
+# rulesets first, so a newly created develop is created under the current rules
+upsert_ruleset "$main_rules"
+upsert_ruleset "$develop_rules"
+
 if $create_develop; then
     if gh api "repos/$repo/branches/develop" >/dev/null 2>&1; then
         echo "branch develop already exists"
@@ -132,6 +139,3 @@ if $create_develop; then
         echo "created branch develop at ${sha:0:7}"
     fi
 fi
-
-upsert_ruleset "$main_rules"
-upsert_ruleset "$develop_rules"
