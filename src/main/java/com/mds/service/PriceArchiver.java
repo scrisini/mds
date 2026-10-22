@@ -2,6 +2,7 @@ package com.mds.service;
 
 import java.util.List;
 
+import com.mds.logging.LogEvent;
 import com.mds.model.AggregatedPrice;
 import com.mds.persistence.PriceRepository;
 import lombok.extern.slf4j.Slf4j;
@@ -34,7 +35,7 @@ public class PriceArchiver {
             repository.save(aggregates);
             log.debug("Archived {} aggregates", aggregates.size());
         } catch (RuntimeException e) {
-            log.error("Failed to archive prices to InfluxDB: {}", e.getMessage());
+            LogEvent.ARCHIVE_FAILED.at(log).with("count", aggregates.size()).with("reason", e.getMessage()).log();
         }
     }
 }

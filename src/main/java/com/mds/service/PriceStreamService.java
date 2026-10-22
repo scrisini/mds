@@ -2,12 +2,15 @@ package com.mds.service;
 
 import java.io.IOException;
 import java.time.Duration;
+import java.util.Map;
 import java.util.Optional;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.function.Consumer;
 
 import com.mds.config.MdsProperties;
 import com.mds.model.AggregatedPrice;
@@ -19,6 +22,7 @@ import io.micrometer.core.instrument.MeterRegistry;
 import io.reactivex.rxjava3.core.BackpressureStrategy;
 import io.reactivex.rxjava3.core.Flowable;
 import io.reactivex.rxjava3.core.Maybe;
+import io.reactivex.rxjava3.core.Observable;
 import io.reactivex.rxjava3.core.Scheduler;
 import io.reactivex.rxjava3.disposables.CompositeDisposable;
 import io.reactivex.rxjava3.schedulers.Schedulers;
@@ -30,18 +34,23 @@ import org.springframework.stereotype.Service;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 
 /**
- * Pushes live aggregates to Server-Sent Event subscribers, throttled per subscriber.
+ * Pushes live aggregates to real-time subscribers over Server-Sent Events and WebSocket.
  *
- * <p>Throttling uses latest-value semantics: the first update is sent immediately, then at most
- * one per interval, always the most recent state. A client that can't keep up is sent the latest
- * aggregate when it catches up, never a backlog.
+ * <p>Each subscription has a {@link StreamRate}: at most N updates per second (or one per interval),
+ * or unthrottled. Throttling uses latest-value semantics: the current aggregate is sent at once,
+ * then at most one update per interval, always the most recent state. Unthrottled subscriptions get
+ * every change. Either way, a client that can't keep up is sent the latest aggregate when it
+ * catches up, never a backlog.
  *
- * <p>Metrics: {@code mds.stream.subscribers} gauge, {@code mds.stream.events} counter tagged
- * {@code pair}.
+ * <p>Metrics: {@code mds.stream.subscribers} gauge and {@code mds.stream.events} counter, both
+ * tagged {@code transport} ({@code sse}/{@code websocket}); events also tagged {@code pair}.
  */
 @Slf4j
 @Service
 public class PriceStreamService {
+
+    public static final String SSE = "sse";
+    public static final String WEBSOCKET = "websocket";
 
     private final QuoteBook quoteBook;
     private final PriceService priceService;
@@ -50,6 +59,7 @@ public class PriceStreamService {
     private final Scheduler throttleScheduler;
     private final Scheduler sendScheduler;
     private final AtomicInteger subscribers = new AtomicInteger();
+    private final Map<String, AtomicInteger> subscribersByTransport = new ConcurrentHashMap<>();
 
     @Autowired
     public PriceStreamService(QuoteBook quoteBook, PriceService priceService, MdsProperties properties,
@@ -57,76 +67,165 @@ public class PriceStreamService {
         this(quoteBook, priceService, properties, registry, Schedulers.computation(), Schedulers.from(executor));
     }
 
-    PriceStreamService(QuoteBook quoteBook, PriceService priceService, MdsProperties properties,
-                       MeterRegistry registry, Scheduler throttleScheduler, Scheduler sendScheduler) {
+    /** With explicit schedulers, so tests can drive time ({@code TestScheduler}) and delivery. */
+    public PriceStreamService(QuoteBook quoteBook, PriceService priceService, MdsProperties properties,
+                              MeterRegistry registry, Scheduler throttleScheduler, Scheduler sendScheduler) {
         this.quoteBook = quoteBook;
         this.priceService = priceService;
         this.settings = properties.stream();
         this.registry = registry;
         this.throttleScheduler = throttleScheduler;
         this.sendScheduler = sendScheduler;
-        Gauge.builder("mds.stream.subscribers", subscribers, AtomicInteger::get)
-                .description("Open SSE price subscriptions")
-                .register(registry);
+        for (String transport : new String[] {SSE, WEBSOCKET}) {
+            AtomicInteger count = new AtomicInteger();
+            subscribersByTransport.put(transport, count);
+            Gauge.builder("mds.stream.subscribers", count, AtomicInteger::get)
+                    .description("Open real-time price subscriptions")
+                    .tag("transport", transport)
+                    .register(registry);
+        }
     }
 
     /**
-     * Opens an SSE subscription for the pair. Each event is named {@code price} and carries an
-     * {@link AggregatedPrice} as JSON.
+     * Resolves a client's requested rate. {@code rate} is a whole number of updates per second
+     * ({@code 1}, {@code 2}, {@code 3}…) or {@code unlimited}; {@code throttle} is the older
+     * minimum-interval form ({@code 500ms}). With neither, {@code mds.stream.default-throttle}.
      *
-     * @param throttle minimum time between events; defaults to {@code mds.stream.default-throttle}
+     * @throws IllegalArgumentException if both are given or the value is out of bounds
      */
-    public SseEmitter subscribe(MarketPair pair, Optional<Duration> throttle) {
-        if (!priceService.pairs().contains(pair)) {
-            throw new PairNotSubscribedException(pair, priceService.pairs());
+    public StreamRate resolveRate(Optional<String> rate, Optional<Duration> throttle) {
+        if (rate.isPresent() && throttle.isPresent()) {
+            throw new IllegalArgumentException("give either rate or throttle, not both");
+        }
+        if (rate.isPresent()) {
+            return parseRate(rate.get().trim());
         }
         Duration interval = throttle.orElse(settings.defaultThrottle());
         if (interval.compareTo(settings.minThrottle()) < 0 || interval.compareTo(settings.maxThrottle()) > 0) {
             throw new IllegalArgumentException("throttle must be between %dms and %dms"
                     .formatted(settings.minThrottle().toMillis(), settings.maxThrottle().toMillis()));
         }
+        return StreamRate.every(interval);
+    }
+
+    private StreamRate parseRate(String value) {
+        if (value.equalsIgnoreCase(StreamRate.UNLIMITED)) {
+            if (!settings.allowUnthrottled()) {
+                throw new IllegalArgumentException("rate=unlimited is disabled on this server; use 1 to " + maxRate());
+            }
+            return StreamRate.unthrottled();
+        }
+        int perSecond;
+        try {
+            perSecond = Integer.parseInt(value);
+        } catch (NumberFormatException e) {
+            throw new IllegalArgumentException(
+                    "rate must be a whole number of updates per second (1 to %d) or '%s', was '%s'"
+                            .formatted(maxRate(), StreamRate.UNLIMITED, value));
+        }
+        if (perSecond < 1 || perSecond > maxRate()) {
+            throw new IllegalArgumentException("rate must be between 1 and %d updates per second, or '%s'"
+                    .formatted(maxRate(), StreamRate.UNLIMITED));
+        }
+        return StreamRate.perSecond(perSecond);
+    }
+
+    /** Highest whole rate allowed: one update per {@code mds.stream.min-throttle}. */
+    int maxRate() {
+        return (int) Math.max(1, Duration.ofSeconds(1).toNanos() / settings.minThrottle().toNanos());
+    }
+
+    /**
+     * Starts a subscription that calls {@code onPrice} with each aggregate (on a virtual thread; a
+     * slow callback holds back only its own subscription). Errors thrown by {@code onPrice}
+     * end the subscription and are passed to {@code onError}.
+     *
+     * @throws PairNotSubscribedException if the pair isn't streamed
+     * @throws StreamCapacityException    if {@code mds.stream.max-subscribers} is reached
+     */
+    public StreamSubscription open(MarketPair pair, StreamRate rate, String transport,
+                                   PriceListener onPrice, Consumer<Throwable> onError) {
+        if (!priceService.pairs().contains(pair)) {
+            throw new PairNotSubscribedException(pair, priceService.pairs());
+        }
+        AtomicInteger transportCount = subscribersByTransport.get(transport);
+        if (transportCount == null) {
+            throw new IllegalArgumentException("unknown transport " + transport);
+        }
         if (subscribers.incrementAndGet() > settings.maxSubscribers()) {
             subscribers.decrementAndGet();
             throw new StreamCapacityException(settings.maxSubscribers());
         }
-
-        SseEmitter emitter = new SseEmitter(settings.timeout().toMillis());
-        CompositeDisposable subscription = new CompositeDisposable();
-        AtomicBoolean released = new AtomicBoolean();
-        Runnable release = () -> {
-            if (released.compareAndSet(false, true)) {
-                subscription.dispose();
-                subscribers.decrementAndGet();
-                log.debug("SSE subscription for {} closed", pair);
-            }
-        };
-        emitter.onCompletion(release);
-        emitter.onTimeout(release);
-        emitter.onError(e -> release.run());
+        transportCount.incrementAndGet();
 
         Counter events = Counter.builder("mds.stream.events")
-                .description("Price events sent to SSE subscribers")
+                .description("Price events sent to real-time subscribers")
                 .tag("pair", pair.symbol())
+                .tag("transport", transport)
                 .register(registry);
-        AtomicLong sequence = new AtomicLong();
-        subscription.add(updates(pair, interval).subscribe(
+        CompositeDisposable disposable = new CompositeDisposable();
+        AtomicBoolean closed = new AtomicBoolean();
+        StreamSubscription subscription = new StreamSubscription() {
+            @Override
+            public MarketPair pair() {
+                return pair;
+            }
+
+            @Override
+            public StreamRate rate() {
+                return rate;
+            }
+
+            @Override
+            public void close() {
+                if (closed.compareAndSet(false, true)) {
+                    disposable.dispose();
+                    subscribers.decrementAndGet();
+                    transportCount.decrementAndGet();
+                    log.debug("{} subscription for {} closed", transport, pair);
+                }
+            }
+        };
+        disposable.add(updates(pair, rate).subscribe(
                 price -> {
-                    send(emitter, sequence.incrementAndGet(), price);
+                    onPrice.accept(price);
                     events.increment();
                 },
-                emitter::completeWithError));
+                error -> {
+                    subscription.close();
+                    onError.accept(error);
+                }));
+        log.debug("{} subscription for {} opened at {}", transport, pair, rate);
+        return subscription;
+    }
 
-        log.debug("SSE subscription for {} opened, throttle {}", pair, interval);
+    /**
+     * Opens an SSE subscription for the pair. Each event is named {@code price} and carries an
+     * {@link AggregatedPrice} as JSON.
+     */
+    public SseEmitter subscribe(MarketPair pair, StreamRate rate) {
+        SseEmitter emitter = new SseEmitter(settings.timeout().toMillis());
+        AtomicLong sequence = new AtomicLong();
+        StreamSubscription subscription = open(pair, rate, SSE,
+                price -> send(emitter, sequence.incrementAndGet(), price),
+                emitter::completeWithError);
+        emitter.onCompletion(subscription::close);
+        emitter.onTimeout(subscription::close);
+        emitter.onError(e -> subscription.close());
         return emitter;
     }
 
-    /** Throttled aggregates for the pair, starting with the current one. */
-    Flowable<AggregatedPrice> updates(MarketPair pair, Duration throttle) {
-        return quoteBook.updates()
+    /** Aggregates for the pair at the given rate, starting with the current one. */
+    Flowable<AggregatedPrice> updates(MarketPair pair, StreamRate rate) {
+        Observable<MarketPair> changes = quoteBook.updates()
                 .map(QuoteUpdate::pair)
                 .filter(pair::equals)
-                .startWithItem(pair)
-                .throttleLatest(throttle.toMillis(), TimeUnit.MILLISECONDS, throttleScheduler, true)
+                .startWithItem(pair);
+        if (rate.throttled()) {
+            changes = changes.throttleLatest(rate.minInterval().toNanos(), TimeUnit.NANOSECONDS,
+                    throttleScheduler, true);
+        }
+        return changes
                 .toFlowable(BackpressureStrategy.LATEST)
                 .observeOn(sendScheduler, false, 1)
                 .concatMapMaybe(p -> Maybe.fromCallable(() -> currentAggregate(p)));
@@ -146,5 +245,11 @@ public class PriceStreamService {
                 .id(Long.toString(id))
                 .name("price")
                 .data(price, MediaType.APPLICATION_JSON));
+    }
+
+    /** Receives each aggregate; may throw to end the subscription (e.g. the client went away). */
+    @FunctionalInterface
+    public interface PriceListener {
+        void accept(AggregatedPrice price) throws Exception;
     }
 }

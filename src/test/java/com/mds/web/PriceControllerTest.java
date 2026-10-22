@@ -3,12 +3,14 @@ package com.mds.web;
 import static org.hamcrest.Matchers.is;
 import static org.mockito.Mockito.when;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.header;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 import java.time.Instant;
 import java.util.List;
 
+import com.mds.logging.RequestIds;
 import com.mds.math.Decimal;
 import com.mds.model.AggregatedPrice;
 import com.mds.model.MarketPair;
@@ -63,8 +65,10 @@ class PriceControllerTest {
         MarketPair doge = MarketPair.parse("DOGE-USDT");
         when(priceService.aggregate(doge)).thenThrow(new PairNotSubscribedException(doge, List.of(BTC_USDT)));
 
-        mvc.perform(get("/api/v1/prices/DOGE-USDT"))
-                .andExpect(status().isNotFound());
+        mvc.perform(get("/api/v1/prices/DOGE-USDT").header(RequestIds.HEADER, "ticket-42"))
+                .andExpect(status().isNotFound())
+                .andExpect(header().string(RequestIds.HEADER, "ticket-42"))
+                .andExpect(jsonPath("$.requestId", is("ticket-42")));
     }
 
     @Test

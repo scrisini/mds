@@ -114,10 +114,11 @@ while IFS= read -r line || [ -n "$line" ]; do
     if [ "${#line}" -gt "$max_length" ]; then
         error "line $line_number is ${#line} characters; wrap the body at $max_length"
     fi
-    # semantic-release only recognises these exact spellings; anything else silently loses a major release
+    # semantic-release reads any line starting with "breaking change" (any case, colon or not) as a
+    # breaking change, but misses the plural: only the two exact footers may start a line with it
     if [[ "$line" =~ ^[[:space:]]*[Bb][Rr][Ee][Aa][Kk][Ii][Nn][Gg][\ -][Cc][Hh][Aa][Nn][Gg][Ee][Ss]?[[:space:]]*:? ]] \
-            && ! [[ "$line" =~ ^BREAKING[\ -]CHANGES?:\ [^[:space:]] ]]; then
-        error "line $line_number: write breaking changes as 'BREAKING CHANGE: <description>' (upper case, colon, space)"
+            && ! [[ "$line" =~ ^BREAKING[\ -]CHANGE:\ [^[:space:]] ]]; then
+        error "line $line_number: write breaking changes as 'BREAKING CHANGE: <description>' or 'BREAKING-CHANGE: <description>' (upper case, singular, colon, space); reword prose that starts a line with 'breaking change'"
     fi
 done <<< "$message"
 

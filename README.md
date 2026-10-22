@@ -8,7 +8,8 @@ serves it over REST, and archives snapshots in InfluxDB 2.x for later retrieval.
 exchange WebSockets ──► MarketStreamManager ──► QuoteBook (latest quote per exchange/pair)
                                                    │
                         REST /api/v1/prices ◄──────┤  aggregated on each request
-                        SSE /api/v1/stream ◄───────┤  pushed on change, throttled per client
+                        SSE /api/v1/stream ◄───────┤  pushed on change, at each client's rate
+                        WebSocket /api/v1/ws ◄─────┤  several pairs per socket, rate per pair
                         CandleService ◄────────────┤  OHLC per tick ──► InfluxDB (every 10s + at midnight)
                         PriceArchiver (every 5s) ◄─┘──► InfluxDB ──► REST /api/v1/history
 ```
@@ -117,7 +118,8 @@ java -jar build/libs/mds-0.0.1-SNAPSHOT.jar
 | POST | `/api/v1/prices/archive` | Archive a snapshot now |
 | GET | `/api/v1/history/{pair}` | Archived aggregates |
 | GET | `/api/v1/history/{pair}/tickers` | Archived per-exchange tickers; optional `exchange=` |
-| GET | `/api/v1/stream/prices/{pair}?throttle=1s` | Server-Sent Events stream of live aggregates |
+| GET | `/api/v1/stream/prices/{pair}?rate=2` | Server-Sent Events stream of live aggregates |
+| WS | `/api/v1/ws/prices` | WebSocket: subscribe to several pairs, each at its own rate |
 | GET | `/api/v1/candles/{pair}?period=day&source=index` | Stored OHLC candles (`day`, `week`, `month`, `year`), oldest first |
 | GET | `/api/v1/candles/{pair}/current?source=index` | Live in-progress candles for every period |
 | GET | `/actuator/health` | Includes `influx` and `streams` (up while any exchange is connected) checks |
@@ -125,22 +127,80 @@ java -jar build/libs/mds-0.0.1-SNAPSHOT.jar
 History endpoints accept `from` / `to` (ISO-8601, default: last hour), `window` (`30s`, `5m`, `1h`, `1d`…
 averages rows into buckets) and `limit` (default 1000, max 10000).
 
-Logging uses Lombok's `@Slf4j`.
+Errors are RFC 9457 problem details. Every response has an `X-Request-Id` header (the caller's, if
+it sent a safe one, otherwise generated), and error bodies repeat it as `requestId`, so a caller
+can quote it to support (see [Logging and support](#logging-and-support)).
 
-### Streaming subscriptions
+### Real-time subscriptions: rates
 
-`GET /api/v1/stream/prices/{pair}` opens a Server-Sent Events stream. Each event is named `price`,
-has an increasing `id`, and carries the same JSON as `/api/v1/prices/{pair}`. The first event is
-sent immediately; after that a client receives at most one event per `throttle` interval, always
-the latest state, and nothing while prices are unchanged. A slow client gets the newest aggregate
-when it catches up, never a backlog.
+Real-time clients can use **Server-Sent Events** (one pair per connection) or **WebSocket**
+(several pairs over one connection). Both push the same aggregate JSON as `/api/v1/prices/{pair}`,
+and both take a **rate**:
 
-`throttle` accepts `250ms`, `2s`, `PT1S`, … between `mds.stream.min-throttle` and
-`max-throttle` (default `1s`). Connections close after `mds.stream.timeout` (EventSource clients
-reconnect automatically); beyond `mds.stream.max-subscribers` new subscriptions get 503.
+| Rate | Delivery |
+|---|---|
+| `1`, `2`, `3` … `10` | at most that many updates per second, always the latest state |
+| `unlimited` | every change to the aggregate, unthrottled |
+| *(none)* | `mds.stream.default-throttle`, 1 per second |
+
+The current aggregate is sent as soon as a subscription opens, and nothing is sent while prices
+don't change. Whatever the rate, a client that can't keep up gets the newest aggregate when it
+catches up, never a backlog. The highest whole rate follows `mds.stream.min-throttle` (100ms, so
+10/s). `rate=unlimited` can be turned off with `mds.stream.allow-unthrottled=false`. Instead of a
+rate you can give `throttle`, a minimum interval (`250ms`, `1.5s`, `PT2S`), but not both.
+Beyond `mds.stream.max-subscribers` subscriptions (SSE connections plus WebSocket pairs), new ones
+get 503.
+
+For scale: in testing an unthrottled BTC-USD subscription delivered about 11 updates per second,
+because that's how often the cross-exchange aggregate changed.
+
+### Server-Sent Events
 
 ```bash
-curl -N 'localhost:8080/api/v1/stream/prices/BTC-USDT?throttle=500ms'
+curl -N 'localhost:8080/api/v1/stream/prices/BTC-USDT?rate=2'
+curl -N 'localhost:8080/api/v1/stream/prices/ETH-USD?rate=unlimited'
+```
+
+Each event is named `price`, has an increasing `id`, and carries an aggregate. Connections close
+after `mds.stream.timeout` (EventSource clients reconnect automatically). Invalid rates get 400.
+
+### WebSocket
+
+Connect to `ws://localhost:8080/api/v1/ws/prices` and send JSON commands:
+
+```jsonc
+→ {"action": "subscribe",   "pair": "BTC-USDT", "rate": 2}
+→ {"action": "subscribe",   "pair": "ETH-USD",  "rate": "unlimited"}
+→ {"action": "subscribe",   "pair": "BTC-USD",  "throttle": "500ms"}
+→ {"action": "unsubscribe", "pair": "BTC-USDT"}
+
+← {"type": "subscribed",   "pair": "BTC-USDT", "rate": "2/s"}
+← {"type": "price",        "pair": "BTC-USDT", "seq": 1, "data": { …aggregate… }}
+← {"type": "unsubscribed", "pair": "BTC-USDT"}
+← {"type": "error",        "status": 400, "message": "rate must be between 1 and 10 updates per second, or 'unlimited'"}
+```
+
+- Each pair has its own rate. Subscribing to a pair again replaces its rate.
+- `seq` counts price messages per pair, from 1.
+- Errors (400 invalid command, 404 pair not streamed or not subscribed, 503 server full) leave the
+  socket open.
+- The current price is sent as soon as a subscription opens, so a `price` message can arrive just
+  before its `subscribed` acknowledgement.
+- A client that stops reading is disconnected with close code 1008 once 512 KB of messages are
+  waiting, instead of the server buffering without limit.
+- Browsers may connect only from `mds.stream.allowed-origins` (default `*`). Non-browser clients
+  aren't affected.
+- Idle sockets close after `mds.stream.timeout`.
+
+From a browser or Node 22+:
+
+```js
+const ws = new WebSocket('ws://localhost:8080/api/v1/ws/prices');
+ws.onopen = () => ws.send(JSON.stringify({ action: 'subscribe', pair: 'BTC-USDT', rate: 2 }));
+ws.onmessage = (e) => console.log(JSON.parse(e.data));
+```
+
+```bash
 curl localhost:8080/api/v1/prices/BTC-USDT
 curl 'localhost:8080/api/v1/history/ETH-USD/tickers?exchange=kraken&window=5m&from=2026-10-21T00:00:00Z'
 ```
@@ -162,12 +222,16 @@ returned as RFC 9457 problem details; pairs that aren't subscribed return 404.
 | `mds.reconnect-delay` | | `5s` before retrying a failed connection or stream |
 | `mds.stale-after` | | `60s`; older quotes are excluded from aggregates |
 | `mds.archive.enabled` / `.interval` | `MDS_ARCHIVE_INTERVAL` | `true` / `5s` |
-| `mds.stream.default-throttle` / `min-throttle` / `max-throttle` | | `1s` / `100ms` / `60s` |
+| `mds.stream.default-throttle` / `min-throttle` / `max-throttle` | | `1s` / `100ms` (caps `rate` at 10/s) / `60s` |
 | `mds.stream.timeout` / `max-subscribers` | | `30m` / `1000` |
+| `mds.stream.allow-unthrottled` | `MDS_STREAM_ALLOW_UNTHROTTLED` | `true` (permits `rate=unlimited`) |
+| `mds.stream.allowed-origins` | `MDS_STREAM_ALLOWED_ORIGINS` | `*` (browser origins for WebSocket) |
 | `mds.decimal.scale` / `.rounding` | `MDS_DECIMAL_SCALE` / `MDS_DECIMAL_ROUNDING` | `8` / `HALF_EVEN` |
 | `mds.ohlc.zone` / `.flush-interval` | `MDS_OHLC_ZONE` | `UTC` / `10s` |
 | `mds.socks-proxy.host` / `.port` | `MDS_SOCKS_PROXY_HOST` / `MDS_SOCKS_PROXY_PORT` | blank (direct) / `1080` |
 | `mds.influx.url` / `token` / `org` / `bucket` | `MDS_INFLUX_*` | `http://localhost:8086` / `mds-dev-token` / `mds` / `prices` |
+| `logging.structured.format.console` | `MDS_LOG_FORMAT` | blank = readable text; `ecs` for ECS JSON in production |
+| `logging.structured.ecs.service.environment` | `MDS_ENVIRONMENT` | `local` |
 
 Each pair is subscribed on every exchange that lists it. Dropped sockets are reconnected by XChange;
 connections that fail and streams that error or end are retried by `MarketStreamManager`. Exchanges
@@ -291,6 +355,31 @@ with a one-time warning; a VWAP whose notional doesn't fit is reported as null.
 Measured against `BigDecimal` with `MathContext.DECIMAL64` (the previous implementation): full
 aggregation of 5 quotes 2.6x faster, mean 1.8x, add 1.2x, multiply 1.1x, sort on par.
 
+## Logging and support
+
+Logs are built for production support and log processors (ELK, Splunk, New Relic):
+
+- **Every operational event has a stable code** (`MDS-nnnn`) with an SOP in
+  [`docs/runbook.md`](docs/runbook.md), which also shows how to search in Kibana, Splunk and
+  New Relic, and which alerts to set up.
+- **JSON in production** (`MDS_LOG_FORMAT=ecs`): one Elastic Common Schema object per line, with
+  `event.code`, `event.reference` (the SOP link), `http.request.id`, `mds.*` details (such as
+  `mds.exchange`) and `error.*`.
+- **One id per request:** `X-Request-Id` ties a caller's error response to every log line it
+  caused. SSE and WebSocket streams keep the id of the request that opened them.
+
+```bash
+MDS_LOG_FORMAT=ecs scripts/dev.sh run      # JSON logs locally
+```
+
+| Code range | Area |
+|---|---|
+| `MDS-1xxx` | Lifecycle: startup, configuration, candle recovery |
+| `MDS-2xxx` | Business outcomes: candles, dropped values |
+| `MDS-30xx` | Exchanges: connections and streams |
+| `MDS-31xx` | InfluxDB: queries, archiving, candle writes |
+| `MDS-9xxx` | Unexpected failures |
+
 ## Metrics
 
 Micrometer meters, visible at `/actuator/metrics/{name}` and tagged `application=mds`:
@@ -302,15 +391,16 @@ Micrometer meters, visible at `/actuator/metrics/{name}` and tagged `application
 | `mds.influx.points` | counter | `measurement` |
 | `mds.influx.query` | timer, p50/p95/p99 | `measurement`, `outcome` |
 | `mds.influx.query.rows` | distribution | `measurement` |
-| `mds.stream.subscribers` | gauge | |
-| `mds.stream.events` | counter | `pair` |
+| `mds.stream.subscribers` | gauge | `transport` (`sse`/`websocket`) |
+| `mds.stream.events` | counter | `pair`, `transport` |
 
 ```bash
 curl 'localhost:8080/actuator/metrics/http.server.requests?tag=uri:/api/v1/prices/{pair}'
 curl 'localhost:8080/actuator/metrics/mds.influx.write?tag=outcome:error'
 ```
 
-For SSE requests `http.server.requests` measures the whole connection.
+For SSE requests `http.server.requests` measures the whole connection; WebSocket traffic isn't
+in `http.server.requests`, so use `mds.stream.*` for it.
 
 ## InfluxDB schema
 
@@ -329,14 +419,15 @@ as the candle changes. The compose bucket has infinite retention.
 
 ```
 com.mds
-├── config/        properties, InfluxDB client, clock, decimal precision, SSE executor
+├── config/        properties, InfluxDB client, clock, decimal precision, SSE executor, lifecycle logging
+├── logging/       LogEvent catalogue, EventLog, LogFields, RequestIds
 ├── exchange/      SupportedExchange, MarketStreamManager (WebSocket lifecycle), stream health check
 ├── math/          Decimal (fixed-point) and its JSON serializer
 ├── model/         MarketPair, PriceQuote, AggregatedPrice, Candle, CandlePeriod, ExchangeStatus, history rows
 ├── service/       QuoteBook (live quotes), PriceService, PriceAggregator, PriceArchiver (@Scheduled),
-│                  PriceStreamService (SSE + throttling), CandleService (OHLC)
+│                  PriceStreamService (SSE/WebSocket subscriptions + rates), CandleService (OHLC)
 ├── persistence/   PriceRepository (Flux queries), InfluxHealthIndicator
-└── web/           REST controllers, ApiExceptionHandler
+└── web/           REST and SSE controllers, PriceWebSocketHandler, ApiExceptionHandler, RequestIdFilter
 ```
 
 ## Contributing
@@ -346,15 +437,19 @@ com.mds
 Versions and release notes are generated by [semantic-release](https://semantic-release.gitbook.io)
 from commit messages on `main`, so every commit follows
 [Conventional Commits](https://www.conventionalcommits.org/), as configured in `.commitlintrc.json`
-and `.releaserc.json`:
+and `.releaserc.json`. Every push to `main` (the squash of a release PR) runs
+`.github/workflows/release.yml`: it runs the tests, then semantic-release creates the `vX.Y.Z` tag
+and a GitHub release with notes. Nothing is released if the tests fail, or if no commit since the
+last tag calls for a release. The first release is `v1.0.0`.
 
 ```
 <type>(<scope>)!: <subject>          ← title: what changes, ≤ 100 characters (aim for ≤ 72)
                                      ← blank line
 <body>                               ← why, and anything a reviewer needs; wrap at 100
                                      ← blank line
-BREAKING CHANGE: <what breaks and how to migrate>
 Refs: #123
+Co-Authored-By: Name <email>
+BREAKING-CHANGE: <what breaks and how to migrate>   ← always the last line
 ```
 
 **Title**
@@ -385,11 +480,21 @@ Refs: #123
 
 - Explain *why* the change was needed and anything non-obvious about *how*; the diff shows the
   rest. Wrap lines at 100 characters.
-- `BREAKING CHANGE: <description>` must be spelled exactly like that (upper case, colon, space),
-  at the start of a footer line, and should say how to migrate. semantic-release ignores any other
-  spelling (`breaking change:`, `BREAKING CHANGE` without a colon), so the major release would
-  silently not happen. The commit-msg hook rejects those spellings.
-- Reference issues with footers such as `Refs: #123` or `Closes: #123`.
+- The breaking-change footer is spelled `BREAKING-CHANGE: ` or `BREAKING CHANGE: ` (upper case,
+  singular, colon, space), at the start of a footer line, and should say how to migrate.
+  semantic-release recognises only those two keywords (`.releaserc.json`), but it matches them
+  loosely: in any case, with a colon or just a space, at the start of **any** body line. So the
+  plural `BREAKING CHANGES:` silently loses the major release, while a prose line such as
+  "Breaking change avoided by…" silently causes one. The commit-msg hook rejects both: only the
+  two exact footers may start a line with "breaking change".
+- **The breaking-change footer goes last.** semantic-release takes everything from it to the end
+  of the message as the release note, so a `Co-Authored-By` or `Refs` line after it would be
+  published in the notes. With trailers, write the hyphenated `BREAKING-CHANGE:` as the **last
+  trailer**, directly after the others with no blank line (indent continuation lines): the spaced
+  form isn't a valid Git trailer, and GitHub would drop the co-author credit.
+- Reference issues with footers such as `Refs: #123` or `Closes: #123`. **Write `#N` only for a
+  real reference:** any `#4` in a message becomes "closes #4" in the release notes, and the release
+  bot comments on that issue or PR. To mention a pull request in passing, write "PR 4".
 - Keep each commit to one logical change: each becomes one entry in the release notes.
 
 | | Message | |
@@ -414,8 +519,8 @@ scripts/dev.sh hooks        # sets git config core.hooksPath to .githooks
 
 It reads the allowed types and scopes from `.commitlintrc.json`, ignores comment lines and the
 `git commit -v` diff, and lets git's own merge, revert, `fixup!` and `squash!` messages through.
-It is slightly stricter than commitlint where that protects releases (misspelt
-`BREAKING CHANGE` footers, empty scopes). A rejected message is kept, so you can fix it with
+It is slightly stricter than commitlint where that protects releases (misspelt or plural
+breaking-change footers, prose lines that start with "breaking change", empty scopes). A rejected message is kept, so you can fix it with
 `git commit -e -F .git/COMMIT_EDITMSG`. It also runs for commits made from IntelliJ and other
 IDEs that use git's hooks.
 
@@ -454,9 +559,10 @@ squash-merge it. semantic-release then sees a single commit, so:
   `feat` if any change is a feature, `!` if any is breaking, otherwise `fix`/`perf`/`refactor`.
   A `docs:` or `chore:` title means no release, whatever the branch contains.
   Example: `feat(candles): add OHLC candles and SOCKS5 proxy support`.
-- **The body keeps every commit message** (the squash default), so any `BREAKING CHANGE:`
-  footer from the branch still triggers a major release. Edit the body into a readable summary if
-  you like, but keep those footers.
+- **The body is the messages of the commits that are new in this release**, so any
+  breaking-change footer from the branch still triggers a major release. GitHub's default body
+  also lists commits already released by an earlier squash; remove those, or their footers and
+  `#N` references land in the release notes a second time.
 
 **Back-merge `main` into `develop` after every squash.** The squash commit on `main` doesn't exist
 in `develop`'s history. Without a back-merge, the next `develop` → `main` PR replays work `main`

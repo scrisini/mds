@@ -4,6 +4,7 @@ import java.util.Optional;
 
 import com.mds.model.MarketPair;
 import com.mds.service.PriceStreamService;
+import com.mds.service.StreamRate;
 import org.springframework.boot.convert.DurationStyle;
 import org.springframework.http.MediaType;
 import org.springframework.web.bind.annotation.GetMapping;
@@ -25,11 +26,14 @@ public class PriceStreamController {
     }
 
     /**
-     * Live aggregate for one pair, e.g. {@code /api/v1/stream/prices/BTC-USDT?throttle=500ms}.
-     * {@code throttle} accepts {@code 250ms}, {@code 2s}, {@code PT1S} and similar.
+     * Live aggregate for one pair, e.g. {@code /api/v1/stream/prices/BTC-USDT?rate=2}.
+     * {@code rate} is updates per second ({@code 1}, {@code 2}, {@code 3}…) or {@code unlimited};
+     * alternatively {@code throttle} gives a minimum interval ({@code 250ms}, {@code 2s}, {@code PT1S}).
      */
     @GetMapping(path = "/prices/{pair}", produces = MediaType.TEXT_EVENT_STREAM_VALUE)
-    public SseEmitter prices(@PathVariable String pair, @RequestParam Optional<String> throttle) {
-        return streamService.subscribe(MarketPair.parse(pair), throttle.map(DurationStyle::detectAndParse));
+    public SseEmitter prices(@PathVariable String pair, @RequestParam Optional<String> rate,
+                             @RequestParam Optional<String> throttle) {
+        StreamRate streamRate = streamService.resolveRate(rate, throttle.map(DurationStyle::detectAndParse));
+        return streamService.subscribe(MarketPair.parse(pair), streamRate);
     }
 }
