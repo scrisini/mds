@@ -67,3 +67,14 @@ logging:
     # XChange logs every HTTP call and WebSocket (re)subscription at INFO
     si.mazi.rescu: WARN
     info.bitrich.xchangestream: WARN
+  structured:
+    format:
+      # ecs in production: one Elastic Common Schema JSON object per line (ELK, Splunk, New Relic).
+      # Blank (the default) gives the readable text pattern below. See docs/runbook.md.
+      console: ${MDS_LOG_FORMAT:}
+    ecs:
+      service:
+        environment: ${MDS_ENVIRONMENT:local}
+  pattern:
+    # Text format: the request id after the logger, catalogued details as key="value"
+    console: "%d{HH:mm:ss.SSS} %5p [%t] %logger{36} %X{http.request.id} - %m %kvp%n%ex"

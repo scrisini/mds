@@ -32,18 +32,42 @@ See README "Running locally" for prerequisites and all `scripts/dev.sh` commands
 
 ```
 com.mds
-├── config/       @ConfigurationProperties records (MdsProperties, InfluxProperties), beans
+├── config/       @ConfigurationProperties records (MdsProperties, InfluxProperties), beans, lifecycle logging
+├── logging/      LogEvent catalogue, EventLog, LogFields, RequestIds: logs for production support
 ├── exchange/     SupportedExchange, MarketStreamManager (WebSocket lifecycle), Bitstamp patch
 ├── math/         Decimal fixed-point type and its JSON serializer
 ├── model/        immutable records: MarketPair, PriceQuote, AggregatedPrice, Candle, …
 ├── service/      QuoteBook, PriceService, PriceAggregator, PriceArchiver, PriceStreamService, CandleService
 ├── persistence/  PriceRepository (all InfluxDB reads/writes), InfluxHealthIndicator
-└── web/          REST/SSE controllers, PriceWebSocketHandler, ApiExceptionHandler (RFC 9457 problem details)
+└── web/          REST/SSE controllers, PriceWebSocketHandler, ApiExceptionHandler (RFC 9457 problem details), RequestIdFilter
 ```
 
 ## Conventions
 
-- **Logging:** Lombok `@Slf4j` only; never declare `LoggerFactory` loggers by hand.
+- **Logging:** Lombok `@Slf4j` only; never declare `LoggerFactory` loggers by hand. Logs are for
+  production support and log processors (ELK, Splunk, New Relic):
+  - **Every operational log line is a catalogued event:**
+    `LogEvent.X.at(log).with("exchange", id).cause(e).log()`. Don't call `log.info/warn/error`
+    directly; `log.debug` is fine for developer diagnostics. A new situation gets a new `LogEvent`
+    constant with a stable code (`MDS-nnnn`, never reused or renumbered), a fixed level and a
+    summary saying what happened, what it means for callers and what happens next, plus a section
+    in `docs/runbook.md` with the same anchor and level. `LogEventCatalogueTest` fails the build if
+    either is missing or they disagree.
+  - Codes: `1xxx` lifecycle, `2xxx` requests and business outcomes, `30xx` exchanges, `31xx`
+    InfluxDB, `9xxx` unexpected failures.
+  - Levels: INFO for lifecycle and business outcomes, WARN for problems the service recovers from
+    or that callers retry, ERROR for things a person must act on (and its summary says what happens
+    next, after a `;`). Alert rules key on codes, so keep a code's level stable.
+  - Details are `mds.*` fields (snake_case: `exchange`, `pair`, `retry_in`, `reason`) holding
+    identifiers and reasons: never whole requests, personal data, secrets or tokens. Use
+    `.with("reason", e.getMessage())` for retried failures and `.cause(e)` (stack trace) for errors.
+  - Field names follow the Elastic Common Schema (`event.code`, `event.reference`,
+    `http.request.id`, `error.*`); constants are in `LogFields`.
+  - Production logs are ECS JSON from Spring Boot's structured logging (`MDS_LOG_FORMAT=ecs`), one
+    object per line. Nothing else may write to stdout in that mode; `StructuredLoggingTest` checks.
+  - Every request gets an id (`RequestIdFilter`): returned in `X-Request-Id`, and as `requestId` in
+    every problem body (`ApiExceptionHandler`). Work handed to other threads must carry it:
+    `try (RequestIds.Scope s = RequestIds.bind(requestId)) { ... }`.
 - **Numbers:** prices and volumes are `com.mds.math.Decimal`, never `BigDecimal` or `double`.
   `BigDecimal` is allowed only at the XChange boundary (`QuoteBook`) and inside `Decimal`;
   `double` only when writing to or reading from InfluxDB. Precision is set by `mds.decimal.*`
@@ -54,7 +78,8 @@ com.mds
   control time (`com.mds.support.MutableClock`).
 - **InfluxDB:** all access goes through `PriceRepository`. Any value interpolated into Flux must be
   validated (`MarketPair` codes, regex-checked ids, enums, `Instant`s); never pass raw user input.
-- **Errors:** throw domain exceptions from services and map them in `ApiExceptionHandler`.
+- **Errors:** throw domain exceptions from services and map them in `ApiExceptionHandler`, which
+  adds the `requestId`. Anything unmapped becomes a 500 logged as `MDS-9001`.
 - **Metrics:** name custom meters `mds.<area>.<thing>`, and keep each meter's tag keys consistent.
 - **Style:** match the surrounding code: constructor injection, records for data, Javadoc on
   public types and non-obvious methods, imports grouped `java.*`, then others, no wildcards.
@@ -90,27 +115,42 @@ com.mds
 - `MarketStreamManager` and `CandleService` are `SmartLifecycle` beans; `CandleService` starts
   first and stops last so it recovers before the first tick and flushes after the last.
 
-## Running the app as an agent
+## Working agreements
 
-A developer may already be running `MdsApplication` from the IDE against the same InfluxDB.
-Check with `pgrep -fl com.mds.MdsApplication` first. Start your copy with a marker,
-`scripts/dev.sh run --mds.instance=agent`, and stop only that one:
-`pkill -f 'mds.instance=agent'`. Never kill processes by class name.
+- When a request is genuinely ambiguous (which library is meant, what a feature should do), ask.
+  Otherwise choose a sensible default and say which one you chose.
+- Verify before claiming: build, run the tests, run the app where it matters, and report failures
+  as failures.
+- One branch per change, cut from `develop`. Never commit directly to `main` or `develop`.
+- Commit, push, open pull requests, merge and delete branches only when asked to.
+- Stage explicit paths. Never commit IDE files (`.idea/`, files the IDE staged) or edits you didn't
+  make; mention them instead.
+- Never `git commit --no-verify`. If the hook rejects a message, fix the message.
+- Don't change repository settings, rulesets or remote branches unless asked. Scripts that do
+  default to a dry run.
+- A developer may already be running `MdsApplication` from the IDE against the same InfluxDB.
+  Check with `pgrep -fl com.mds.MdsApplication` first. Start your copy with a marker,
+  `scripts/dev.sh run --mds.instance=agent`, and stop only that one:
+  `pkill -f 'mds.instance=agent'`. Never kill processes by class name.
 
 ## Commits and releases
 
 Commits follow [Conventional Commits](https://www.conventionalcommits.org/), enforced locally by
 `.githooks/commit-msg` (install with `scripts/dev.sh hooks`) and on pull requests by the
 `commitlint` workflow, both using `.commitlintrc.json`. semantic-release (`.releaserc.json`) reads
-them to pick the next version. Never use `git commit --no-verify`; if the hook rejects a message,
-fix the message. Full guide: README "Contributing".
+them to pick the next version; the `release` workflow (`.github/workflows/release.yml`) runs it on
+every push to `main`, after the tests pass, and publishes the tag and GitHub release. Never use
+`git commit --no-verify`; if the hook rejects a message, fix the message. Full guide: README
+"Contributing".
 
 ```
 <type>(<optional scope>): <imperative summary, lower case, no period>
 
 <body: what and why, wrapped at 100>
 
-BREAKING CHANGE: <what breaks and how to migrate>
+Refs: #123
+Co-Authored-By: Name <email>
+BREAKING-CHANGE: <what breaks and how to migrate>
 ```
 
 | Type | Use for | Release |
@@ -122,8 +162,19 @@ BREAKING CHANGE: <what breaks and how to migrate>
 | `revert` | reverting a previous commit | patch |
 | `docs`, `test`, `build`, `ci`, `chore`, `style` | everything else | none |
 
-A `BREAKING CHANGE:` footer, or `!` after the type (`feat!:`), triggers a major release. Use it
-for any incompatible change to the REST/SSE API, configuration keys or InfluxDB schema.
+A breaking-change footer, or `!` after the type (`feat!:`), triggers a major release. Use it
+for any incompatible change to the REST/SSE/WebSocket API, configuration keys, log event codes or
+InfluxDB schema.
+
+- Spell the footer `BREAKING-CHANGE: ` or `BREAKING CHANGE: `; anything else is silently ignored
+  by semantic-release, and the hook rejects it.
+- **The breaking-change footer goes last.** semantic-release takes everything from it to the end
+  of the message as the release note, so any line after it (`Co-Authored-By`, `Refs`) ends up in
+  the published notes. With trailers, write the hyphenated `BREAKING-CHANGE:` as the **last line
+  of the trailer block**, directly after them with no blank line (indent continuation lines). The
+  spaced form isn't a valid Git trailer and would make GitHub drop the co-author credit.
+- **Write `#N` only for a real reference.** Any `#4` becomes "closes #4" in the release notes, and
+  the release bot comments on that issue or PR. To mention a pull request in passing, write "PR 4".
 
 Suggested scopes: `streaming`, `prices`, `candles`, `decimal`, `metrics`, `persistence`, `api`,
 `config`, `deps`.
@@ -139,6 +190,10 @@ feat(api)!: rename POST /prices/collect to /prices/archive
 Branching (README "Branching and merging"): branch from `develop`, open a pull request into
 `develop` and merge it with a **merge commit** (never squash or rebase into `develop`). Releases
 go `develop` → `main` by **squash** merge, with a PR title that is a valid Conventional Commit
-carrying the highest bump of the included changes; afterwards back-merge `main` into `develop`
-with a merge commit. Never push directly to `main` or `develop`. If `develop` doesn't exist yet,
+carrying the highest bump of the included changes, and a squash body made of the messages of the
+commits that are **new** in this release (GitHub's default also lists already-released commits,
+whose footers and `#N` references would land in the notes again); afterwards back-merge `main`
+into `develop` with a merge commit. The first squash into `main` with `release.yml` in place
+publishes **v1.0.0**: dry-run it first (`npx semantic-release --dry-run --no-ci` on a clone of
+`main` with the two packages pinned in `release.yml`). Never push directly to `main` or `develop`. If `develop` doesn't exist yet,
 branch from `main` and target `main`.

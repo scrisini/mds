@@ -8,6 +8,7 @@ import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
+import com.mds.logging.LogEvent;
 import com.mds.math.Decimal;
 import com.mds.model.MarketPair;
 import com.mds.model.PriceQuote;
@@ -91,8 +92,9 @@ public class QuoteBook {
             return Decimal.ofNullable(value);
         } catch (ArithmeticException e) {
             if (reportedOverflows.add(exchange + "." + field)) {
-                log.warn("{} {}={} exceeds the decimal range at scale {} (max {}); dropping this field",
-                        exchange, field, value, Decimal.scale(), Decimal.max());
+                LogEvent.QUOTE_VALUE_OUT_OF_RANGE.at(log).with("exchange", exchange).with("field", field)
+                        .with("value", value.toPlainString()).with("scale", Decimal.scale())
+                        .with("max", Decimal.max()).log();
             }
             return null;
         }
