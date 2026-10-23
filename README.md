@@ -986,3 +986,30 @@ git blame -L 40,60 src/main/java/Foo.java     # who last changed these lines, an
 
 Prefer `revert` over `reset` for anything already pushed: `reset` rewrites history others may
 have.
+
+### FAQ
+
+**GitHub says `main` is "N commits behind" `develop`. Is something out of sync?**
+
+No: with squash releases that's expected, and the number grows with every release. A release
+copies `develop`'s changes into one new commit on `main`, so `develop`'s original commits (and
+its merge commits) never become part of `main`'s history. GitHub counts commits, not content.
+
+Check content and the back-merge instead:
+
+```bash
+git fetch
+git diff --stat origin/main origin/develop    # empty: same files (right after a back-merge)
+git merge-base --is-ancestor origin/main origin/develop && echo "back-merged"
+```
+
+Between releases the diff shows exactly the work waiting for the next release, which is expected
+too. What matters is that `main` is an ancestor of `develop`. If it isn't, back-merge
+(see [Back-merging](#back-merging)).
+
+Don't try to make the count zero:
+- **Fast-forwarding `main` to `develop`** is blocked by the rulesets (`main` is squash-only with
+  linear history). If it went through, semantic-release would read the old commits as new and
+  publish a release that repeats work already released.
+- **Resetting `develop` to `main` and force-pushing** rewrites shared history. The rulesets block
+  it too, and every branch cut from `develop` would conflict.
