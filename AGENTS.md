@@ -81,6 +81,15 @@ com.mds
 - **Errors:** throw domain exceptions from services and map them in `ApiExceptionHandler`, which
   adds the `requestId`. Anything unmapped becomes a 500 logged as `MDS-9001`.
 - **Metrics:** name custom meters `mds.<area>.<thing>`, and keep each meter's tag keys consistent.
+- **Design:** follow `docs/design-principles.md`, and record decisions in README "Design":
+  - A new type needs a reason: an invariant, a lifecycle, a boundary or a domain concept.
+    Interfaces only at real seams; compound keys are private nested records.
+  - Each method has one purpose; a coordinator only calls its steps.
+  - On the hot paths (README "Performance: JIT and GC"), keep methods small and call sites
+    monomorphic. Use loops rather than streams, no exceptions for routine outcomes (return
+    `Optional`), and build constants and indexes once.
+  - Bound anything that grows with traffic. Claim a speed-up only with a measurement: a `perf`
+    commit carries the numbers.
 - **Style:** match the surrounding code: constructor injection, records for data, Javadoc on
   public types and non-obvious methods, imports grouped `java.*`, then others, no wildcards.
 

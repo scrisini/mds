@@ -430,6 +430,137 @@ com.mds
 └── web/           REST and SSE controllers, PriceWebSocketHandler, ApiExceptionHandler, RequestIdFilter
 ```
 
+## Design
+
+This section records why the code is shaped the way it is. The general rules behind it (object
+granularity, single-purpose methods, code the JIT and GC handle well) are in
+[`docs/design-principles.md`](docs/design-principles.md). Change a decision here in the same pull
+request as the code.
+
+### Decisions
+
+| Decision | Why | Trade-off |
+|---|---|---|
+| **Latest state, not an event log.** `QuoteBook` keeps the latest quote per exchange and pair; its update stream only says *which pair changed*, and consumers read the current state. | A slow consumer skips to the latest state instead of working through a backlog. Memory is bounded by exchanges × pairs, whatever the tick rate. | Intermediate ticks aren't replayable. Candles fold every tick into high and low as it arrives, so they don't need them. |
+| **Aggregate on read.** `PriceService` aggregates the fresh quotes when asked: per REST request, per stream event, per candle update. | Staleness (`mds.stale-after`) is always judged against *now*, so an exchange that went quiet drops out without a timer. | The work repeats once per real-time subscriber (see [Hotspots](#hotspots)). |
+| **Fixed-point `Decimal`** (a `long` count of 10^-scale units, with one scale and rounding per JVM). | Exact arithmetic for prices, without allocating `BigDecimal`s or accumulating `double` rounding errors; comparisons are a `long` compare. | The range is ±92 billion at scale 8. Precision is JVM-global, set once at startup. |
+| **Immutable records, with methods that return new values** (`PriceQuote.mergedWith`, `Candle.with`). | Quotes arrive on several exchange I/O threads at once. Immutable values can be shared without locks, and `ConcurrentHashMap.merge`/`compute` replaces one per key atomically. | One short-lived object per update, which young-generation GC handles cheaply. |
+| **Latest-value throttling per subscriber** (`throttleLatest`, `BackpressureStrategy.LATEST`, `observeOn` with a buffer of 1, a virtual thread per send). | Each client gets its own rate. A slow one is sent the newest state when it catches up and never holds a queue; WebSocket sends are capped at 512 KB, after which the client is disconnected. | A fast-changing pair is sampled, not replayed, for throttled clients. |
+| **One subscription path for every transport** (`PriceStreamService.open` takes a `PriceListener` callback). | Rates, the subscriber limit, metrics and slow-client handling live in one place; SSE and WebSocket only format and send. | Transports can't change throttling behaviour independently. |
+| **One InfluxDB boundary** (`PriceRepository`). | Every Flux query is in one class, where interpolated values are checked and every call is timed. | Large for a single class, but it splits naturally by measurement if it grows. |
+| **Ordered lifecycles** (`SmartLifecycle` phases). | `CandleService` reloads candles before the first tick and flushes after the last; `MarketStreamManager` connects in between. | Startup order lives in phase numbers, so it's documented on the beans. |
+| **Fail-closed proxy.** Startup is refused if exchange REST calls wouldn't use SOCKS. | It's a security requirement: a misconfiguration must not leak traffic around the proxy. | An XChange upgrade that changes its proxy handling can't be merged until `SocksProxyTest` passes. |
+| **`Optional` for an expected absence, exceptions for failures.** `PriceService.current` is empty while no exchange has a fresh price; `aggregate` throws `PriceUnavailableException` for REST, which maps it to 503. | "No price yet" is routine at startup and for quiet pairs. Streams and candles check it on every update, where throwing would capture a stack trace each time. | Two methods for one computation. |
+| **Injected `Clock`.** | Tests control time (staleness, period boundaries, throttling with `TestScheduler`). | Every time-dependent bean takes a constructor argument. |
+
+### Patterns
+
+| Pattern | Where | Why here |
+|---|---|---|
+| Value object | `MarketPair`, `Decimal`, `Candle`, `StreamRate` | Validation and behaviour sit with the data; a `MarketPair` is always safe to put in a Flux query. |
+| Observer (publish/subscribe) | `QuoteBook.updates()`, an RxJava serialized subject | Candles and streams react to changes without `QuoteBook` knowing about them. |
+| Facade | `PriceService` over `QuoteBook`, `MarketStreamManager` and `PriceAggregator` | Controllers, streams and candles ask one question ("the aggregate for this pair") without assembling it. |
+| Functional core, imperative shell | `PriceAggregator` (pure) inside `PriceService` (clock and state) | The statistics are tested with plain lists, without mocks or time. |
+| Repository | `PriceRepository` | One place for storage access, query validation and storage metrics. |
+| Anti-corruption layer | `QuoteBook` (XChange `BigDecimal` → `Decimal`), `PatchedBitstampStreamingExchange` | Library types and bugs stop at the boundary. The patch has a guard test that fails once upstream is fixed. |
+| Enum with behaviour | `CandlePeriod` (`start`/`end` per period), `SupportedExchange`, `LogEvent` | Closed sets with a `switch` instead of a class hierarchy; call sites stay monomorphic. |
+| Catalogue and fluent builder | `LogEvent.X.at(log).with(...).log()` | Every operational line has a stable code, level and SOP link, and call sites read as one sentence. |
+| Decorator | `ConcurrentWebSocketSessionDecorator` | Thread-safe, bounded sends without changing the handler. |
+| Template method hook | `ApiExceptionHandler.createResponseEntity` | Adds the `requestId` to Spring's own problem responses. |
+| Scoped resource | `RequestIds.bind` returns a `Scope` for try-with-resources | The request id can't leak into the next task on a pooled thread. |
+| Retry with fixed delay | `retryWhen`/`repeatWhen` in `MarketStreamManager` | Dropped streams and failed connections come back without manual action. |
+
+**Deliberately not used:**
+- Interface-plus-`Impl` pairs for single implementations.
+- Separate DTOs mapped 1:1 from the records. The API serialises the model records, which is fine
+  at this size, but a model change is an API change, so review it as one.
+- A generic event bus, or abstract base controllers.
+- Wrapper types for exchange ids: they're plain strings, validated at the boundaries
+  (`EXCHANGE_ID`, `SupportedExchange`).
+
+### Granularity and method size
+
+A type exists here because it holds an invariant (`MarketPair`, `Decimal`), owns a lifecycle or
+resource (`MarketStreamManager`, `CandleService`), hides a boundary (`PriceRepository`,
+`QuoteBook`), or names a domain concept (`Candle`, `AggregatedPrice`). A noun alone doesn't earn
+a type. Compound map keys are private nested records (`QuoteBook.Key`, `CandleService.Key`), not
+concatenated strings or nested maps.
+
+Methods have one purpose. A method that coordinates calls its steps in order and does nothing
+else, for example:
+
+```java
+synchronized void flush() {            // CandleService
+    closeEndedPeriods(clock.instant());
+    write(drainCompleted());
+}
+```
+
+These follow the same shape:
+- `PriceStreamService.open`: `reserveSlot`, `eventsCounter`, then a named `Subscription`.
+- `MarketStreamManager.start`: `start(exchange, pairs)`, then `create`, `attach`, `products`.
+- `CandleService.recover`: `resume` per stored candle.
+
+The split stops where a name would only restate a line of code.
+
+### Performance: JIT and GC
+
+The hot paths, in order of volume:
+1. **Every tick:** `QuoteBook.onTicker` and `CandleService.onUpdate`. That's tens per second
+   across exchanges.
+2. **Every change × every subscriber:** `PriceService.current`, `PriceAggregator` and JSON
+   serialisation.
+3. **Every flush or snapshot:** `CandleService.flush` and `PriceRepository` writes.
+
+What's done for the JIT and GC, and why:
+- **Primitive arithmetic.** `Decimal` multiplies and divides in 128 bits on `long`s, so prices
+  never allocate a `BigDecimal` after they arrive from XChange.
+- **Small, single-purpose, `final`/`private`/`static` methods.** HotSpot always inlines methods
+  under 35 bytes of bytecode, and hot ones up to 325 bytes. Inlining is what enables escape
+  analysis, which can remove short-lived allocations altogether. Records, enums and final
+  classes keep call sites monomorphic.
+- **Loops in the per-subscriber path.** `PriceAggregator` sorts one array and scans it, with no
+  streams, comparators or `Optional` chains per call. `MarketStreamManager.exchangesFor` reads
+  an index built when connections change, instead of filtering and sorting on every
+  aggregation.
+- **No exceptions for routine outcomes** on per-event paths: `PriceService.current` returns
+  `Optional`.
+- **Constants built once.** Each `LogEvent` builds its `[CODE] summary` message and runbook link
+  in its constructor; meters on per-event paths are registered once and kept.
+- **Bounded memory.** Latest-value state, `LATEST` backpressure, a 512 KB WebSocket send buffer
+  per client, and the completed-candle queue drained on every flush.
+
+Not done, deliberately:
+- Per-tick `QuoteBook.Key` and `MarketPair.toString()` allocations. At tens per second they cost
+  nanoseconds and die young; caching them would add state for no measurable gain.
+- Tuning the default G1 collector and heap ergonomics. Set the heap limit in deployment, and
+  tune only with a recording that shows a reason.
+
+#### Hotspots
+
+The next candidates, each needing a decision before changing:
+- **Aggregation and serialisation run once per subscriber per change.** With N subscribers on a
+  pair, a change costs N aggregations and N JSON encodings. Sharing one aggregate per pair per
+  change would make this constant. However, the aggregate's `timestamp` would then mean "time of
+  the change", not "time sent", and the staleness check would run per change rather than per
+  send.
+- **Every subscriber's filter sees every pair's updates.** A subject per pair would route
+  updates directly.
+
+To measure, start InfluxDB (`scripts/dev.sh infra`) and record a run with JFR, skipping the
+first minute so startup doesn't dominate. Put load on it while it records (real-time
+subscribers, for the per-subscriber path):
+
+```bash
+./gradlew bootJar
+java -XX:StartFlightRecording=delay=60s,duration=5m,filename=build/mds.jfr \
+    -jar "$(ls build/libs/mds-*.jar | grep -v plain)" --mds.instance=agent
+jfr view allocation-by-class build/mds.jfr   # jfr is in the JDK's bin directory
+jfr view hot-methods build/mds.jfr           # or open the file in JDK Mission Control
+```
+
+Commits typed `perf` carry before-and-after numbers in the body.
+
 ## Contributing
 
 ### Commit messages (semantic-release)
