@@ -1,0 +1,28 @@
+# Grafana data sources for docker-compose.yml (local development only; README "Dashboards"). The
+# dashboards in config/grafana/dashboards refer to them by uid.
+apiVersion: 1
+
+datasources:
+  - name: Prometheus
+    uid: prometheus
+    type: prometheus
+    access: proxy
+    url: http://prometheus:9090
+    isDefault: true
+    editable: false
+    jsonData:
+      timeInterval: 5s
+
+  # Flux, with the settings of the influxdb service; the token is the local development default
+  - name: InfluxDB
+    uid: influxdb
+    type: influxdb
+    access: proxy
+    url: http://influxdb:8086
+    editable: false
+    jsonData:
+      version: Flux
+      organization: mds
+      defaultBucket: prices
+    secureJsonData:
+      token: mds-dev-token

@@ -1,0 +1,16 @@
+# Prometheus for the Grafana stack in docker-compose.yml (local development only; README "Dashboards").
+# Scrapes both services by their names on the compose network "mds".
+global:
+  scrape_interval: 5s
+  evaluation_interval: 5s
+
+scrape_configs:
+  - job_name: mds
+    metrics_path: /actuator/prometheus   # needs MDS_PROMETHEUS_ENABLED=true (config/docker.env)
+    static_configs:
+      - targets: ["mds:8080"]
+
+  - job_name: influxdb
+    metrics_path: /metrics
+    static_configs:
+      - targets: ["influxdb:8086"]

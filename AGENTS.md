@@ -22,7 +22,7 @@ cluster that shares the candles and balances real-time subscribers.
 ./gradlew compileJava          # fast compile check
 scripts/dev.sh check           # verify local prerequisites (Java, Docker, ports, exchange reachability)
 scripts/dev.sh run [args...]   # start InfluxDB, then the app on :8080; args go to Spring Boot
-scripts/dev.sh docker [--build] # InfluxDB and mds both in Docker (network mds, config/docker.env)
+scripts/dev.sh docker [--build] # InfluxDB, mds, Prometheus, Grafana in Docker (config/docker.env)
 scripts/dev.sh status          # InfluxDB and app health
 scripts/dev.sh hooks           # install the commit-msg hook (do this once per clone)
 scripts/test-commit-msg.sh     # test the hook after changing it or .commitlintrc.json
@@ -113,7 +113,9 @@ com.mds
 - **Metrics:** name custom meters `mds.<area>.<thing>`, and keep each meter's tag keys consistent.
   Quote updates carry `receivedNanos` (stamped by `QuoteBook`) so the time to subscribers
   (`mds.stream.latency`, `mds.stream.queue`) and to candles (`mds.candles.lag`) is measured; keep it
-  on anything new that consumes updates. A change to the stream path re-measures README
+  on anything new that consumes updates. A meter that shows whether mds is healthy also gets a
+  panel in `config/grafana/dashboards/mds-health.json` (README "Dashboards"); check its query
+  against `/actuator/prometheus`, where names use underscores. A change to the stream path re-measures README
   "Capacity" with `scripts/load-sse.mjs`, and updates its numbers in the same pull request.
 - **Design:** follow `docs/design-principles.md`, and record decisions in README "Design":
   - A new type needs a reason: an invariant, a lifecycle, a boundary or a domain concept.

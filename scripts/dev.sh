@@ -5,11 +5,11 @@
 #   scripts/dev.sh check            verify prerequisites
 #   scripts/dev.sh infra            start InfluxDB (Docker) and wait until it is healthy
 #   scripts/dev.sh run [args...]    check, start InfluxDB, then run the app in the foreground
-#   scripts/dev.sh docker [--build] start InfluxDB and mds in Docker (builds the image if missing)
+#   scripts/dev.sh docker [--build] start InfluxDB, mds, Prometheus and Grafana in Docker
 #   scripts/dev.sh status           show InfluxDB and app health
 #   scripts/dev.sh test             run the test suite
-#   scripts/dev.sh stop             stop InfluxDB (and mds in Docker), keeping the data
-#   scripts/dev.sh reset [--yes]    stop the containers and delete all InfluxDB data
+#   scripts/dev.sh stop             stop the containers, keeping the data
+#   scripts/dev.sh reset [--yes]    stop the containers and delete their data (InfluxDB, Grafana, ...)
 #   scripts/dev.sh hooks            install the git hooks in .githooks (commit messages, plaintext secrets)
 #
 # Extra arguments to `run` are passed to Spring Boot, e.g.
@@ -221,7 +221,7 @@ cmd_docker() {
     if listening "$APP_PORT"; then
         die "port $APP_PORT is in use (mds from the IDE?); stop it, or set SERVER_PORT for another host port"
     fi
-    step "Starting InfluxDB and mds in Docker (network mds)"
+    step "Starting InfluxDB, mds, Prometheus and Grafana in Docker (network mds)"
     MDS_IMAGE="$MDS_IMAGE" MDS_HTTP_PORT="$APP_PORT" docker compose --profile app up -d
     printf '    waiting for http://localhost:%s/actuator/health/readiness ' "$APP_PORT"
     local _
@@ -230,6 +230,7 @@ cmd_docker() {
             printf '%sready%s\n' "$GREEN" "$RESET"
             ok "mds: http://localhost:$APP_PORT, logs: docker compose logs -f mds"
             ok "InfluxDB UI: $LOCAL_INFLUX_URL (admin / admin-password)"
+            ok "Grafana: http://localhost:${GRAFANA_PORT:-3000} (dashboards without login; admin / admin to edit)"
             return
         fi
         printf '.'
@@ -258,13 +259,13 @@ cmd_status() {
 }
 
 cmd_stop() {
-    step "Stopping InfluxDB and mds containers (data is kept)"
+    step "Stopping the containers (data is kept)"
     docker compose --profile app stop
 }
 
 cmd_reset() {
     if [ "${1:-}" != "--yes" ]; then
-        printf 'This deletes all local InfluxDB data (prices, history, candles). Continue? [y/N] '
+        printf 'This deletes all local InfluxDB data (prices, history, candles), and Prometheus and Grafana data. Continue? [y/N] '
         local answer
         read -r answer
         case "$answer" in
@@ -272,7 +273,7 @@ cmd_reset() {
             *) die "aborted" ;;
         esac
     fi
-    step "Removing the containers and InfluxDB data volumes"
+    step "Removing the containers and their data volumes"
     docker compose --profile app down --volumes
 }
 
