@@ -1,0 +1,23 @@
+# mds on Kubernetes (EKS) behind an AWS Application Load Balancer. See docs/deployment.md.
+#   kubectl apply -k deploy/k8s            (after editing the values marked CHANGE)
+# Create the influxdb-auth Secret first (from Vault, External Secrets or by hand); it isn't in git.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: mds
+labels:
+  - pairs:
+      app.kubernetes.io/part-of: mds
+resources:
+  - namespace.yaml
+  - serviceaccount.yaml
+  - configmap.yaml
+  - deployment.yaml
+  - services.yaml
+  - pdb.yaml
+  - networkpolicy.yaml
+  - ingress.yaml
+  - influxdb.yaml
+images:
+  - name: mds
+    newName: 123456789012.dkr.ecr.ap-southeast-2.amazonaws.com/mds   # CHANGE: your registry
+    newTag: 1.1.0                                                     # CHANGE: the release to run

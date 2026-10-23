@@ -1,0 +1,97 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mds
+spec:
+  replicas: 3                       # one per availability zone
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: mds
+  strategy:
+    # One pod at a time, never below the running count: each leaving member hands its candles to the
+    # others and its clients reconnect to them, so the others keep full capacity meanwhile.
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: mds
+    spec:
+      serviceAccountName: mds
+      # preStop (20s) + one shutdown phase (30s, spring.lifecycle.timeout-per-shutdown-phase) for the
+      # web server + flushing candles and handing over cluster data, with margin
+      terminationGracePeriodSeconds: 75
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: topology.kubernetes.io/zone
+          whenUnsatisfiable: DoNotSchedule
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: mds
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              app.kubernetes.io/name: mds
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: mds
+          image: mds
+          ports:
+            - name: http
+              containerPort: 8080
+            - name: hazelcast
+              containerPort: 5701
+          envFrom:
+            - configMapRef:
+                name: mds-env
+          resources:
+            requests:
+              cpu: 500m
+              memory: 1536Mi
+            limits:
+              # The image sizes the heap from this: limit minus about 650 MiB (thread stacks, code
+              # cache, metaspace), so about 870 MiB here. Below 1 GiB the heap is too small to start.
+              memory: 1536Mi
+          startupProbe:               # Hazelcast join and candle recovery from InfluxDB come first
+            httpGet:
+              path: /actuator/health/liveness
+              port: http
+            periodSeconds: 5
+            failureThreshold: 36      # 3 minutes
+          livenessProbe:
+            httpGet:
+              path: /actuator/health/liveness
+              port: http
+            periodSeconds: 10
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /actuator/health/readiness
+              port: http
+            periodSeconds: 5
+            failureThreshold: 2
+          lifecycle:
+            preStop:
+              # Keep serving while the endpoint removal reaches the ALB (target-type ip), so no new
+              # request lands on a pod that has stopped accepting. The image has no shell, so this
+              # is the built-in sleep action (Kubernetes 1.30+), not "exec sleep".
+              sleep:
+                seconds: 20
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}

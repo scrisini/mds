@@ -4,7 +4,8 @@ Spring Boot service that streams real-time ticker data over WebSocket from sever
 [XChange](https://github.com/knowm/XChange) (`xchange-stream-*`), aggregates it per currency pair,
 serves it over REST, and archives snapshots in InfluxDB 2.x for later retrieval. Several
 instances form an embedded Hazelcast cluster, so losing one loses no candles (see
-[Running several instances](#running-several-instances)).
+[Running several instances](#running-several-instances)). To run it in production on AWS (ECS or
+EKS behind an ALB), see [`docs/deployment.md`](docs/deployment.md).
 
 ```
 exchange WebSockets ──► MarketStreamManager ──► QuoteBook (latest quote per exchange/pair)
@@ -168,6 +169,9 @@ curl -N 'localhost:8080/api/v1/stream/prices/ETH-USD?rate=unlimited'
 
 Each event is named `price`, has an increasing `id`, and carries an aggregate. Connections close
 after `mds.stream.timeout` (EventSource clients reconnect automatically). Invalid rates get 400.
+Every `mds.stream.heartbeat` (30 s) the stream also carries a comment line, `:heartbeat`, so load
+balancers and proxies don't close it while the pair is quiet; `EventSource` ignores comments, and
+other clients should skip lines that start with `:`.
 
 ### WebSocket
 
@@ -195,7 +199,10 @@ Connect to `ws://localhost:8080/api/v1/ws/prices` and send JSON commands:
   waiting, instead of the server buffering without limit.
 - Browsers may connect only from `mds.stream.allowed-origins` (default `*`). Non-browser clients
   aren't affected.
-- Idle sockets close after `mds.stream.timeout`.
+- While a socket has a subscription, the server sends a WebSocket ping every
+  `mds.stream.heartbeat` (30 s), so load balancers keep it open while its pairs are quiet. Browsers
+  and most client libraries answer pings by themselves; page scripts never see them.
+- Sockets with no subscription close after `mds.stream.timeout` without activity.
 
 From a browser or Node 22+:
 
@@ -231,6 +238,7 @@ Deployed environments take their settings from AWS SSM Parameter Store and their
 | `mds.archive.enabled` / `.interval` | `MDS_ARCHIVE_INTERVAL` | `true` / `5s` |
 | `mds.stream.default-throttle` / `min-throttle` / `max-throttle` | | `1s` / `100ms` (caps `rate` at 10/s) / `60s` |
 | `mds.stream.timeout` / `max-subscribers` | | `30m` / `1000` |
+| `mds.stream.heartbeat` | `MDS_STREAM_HEARTBEAT` | `30s`: an SSE comment or WebSocket ping on every open stream; `0` turns it off. Must be shorter than the load balancer's idle timeout |
 | `mds.stream.allow-unthrottled` | `MDS_STREAM_ALLOW_UNTHROTTLED` | `true` (permits `rate=unlimited`) |
 | `mds.stream.allowed-origins` | `MDS_STREAM_ALLOWED_ORIGINS` | `*` (browser origins for WebSocket) |
 | `mds.decimal.scale` / `.rounding` | `MDS_DECIMAL_SCALE` / `MDS_DECIMAL_ROUNDING` | `8` / `HALF_EVEN` |
@@ -244,6 +252,7 @@ Deployed environments take their settings from AWS SSM Parameter Store and their
 | `mds.cluster.kubernetes-service-dns` | `MDS_CLUSTER_KUBERNETES_SERVICE_DNS` | blank; a headless Service to find the pods |
 | `mds.cluster.rebalance.enabled` / `.interval` | `MDS_CLUSTER_REBALANCE_ENABLED` | `true` / `10s` |
 | `mds.cluster.rebalance.tolerance` / `.max-per-round` | | `0.2` (20% over the fair share) / `20` |
+| `server.tomcat.keep-alive-timeout` | `MDS_SERVER_KEEP_ALIVE_TIMEOUT` | `130s`; must be longer than the load balancer's idle timeout ([Timeouts](docs/deployment.md#timeouts)) |
 | `logging.structured.format.console` | `MDS_LOG_FORMAT` | blank = readable text; `ecs` for ECS JSON in production |
 | `logging.structured.ecs.service.environment` | `MDS_ENVIRONMENT` | `local` |
 
@@ -515,8 +524,9 @@ plus `tolerance` closes its newest subscriptions, down to the fair share and at 
 - **WebSocket** clients get close code **1013** (try again later) and must reconnect and subscribe
   again.
 
-Use **least-connections** balancing, so reconnects go to the quieter instances; no session
-stickiness is needed. Set `MDS_CLUSTER_REBALANCE_ENABLED=false` to keep clients where they are.
+Use **least-connections** balancing (on an AWS ALB, which has no such mode, use least outstanding
+requests), so reconnects go to the quieter instances; no session stickiness is needed. Set
+`MDS_CLUSTER_REBALANCE_ENABLED=false` to keep clients where they are.
 
 **Deploying**
 
@@ -533,7 +543,10 @@ stickiness is needed. Set `MDS_CLUSTER_REBALANCE_ENABLED=false` to keep clients 
   Hazelcast's phone-home, cloud auto-detection and multicast are off, so the only connections are
   to the configured members.
 - **Rolling deploys** work: instances leave and join one at a time, and their pairs move with their
-  candles. Stop instances gracefully (SIGTERM): the member hands its data over before it exits.
+  candles. Stop instances gracefully (SIGTERM): the instance first closes its SSE and WebSocket
+  streams, so clients reconnect elsewhere at once ([MDS-1014](docs/runbook.md#mds-1014)), and hands
+  its data over before it exits. Load balancer settings, timeouts and ready-made ECS and Kubernetes
+  files: [`docs/deployment.md`](docs/deployment.md).
 - **`mds.decimal.*` and `mds.ohlc.zone` must match on every instance**, because the shared candles
   depend on them. An instance that disagrees with the running cluster refuses to start
   ([MDS-1009](docs/runbook.md#mds-1009)). To change them, stop every instance, then start them all
@@ -670,7 +683,7 @@ request as the code.
 | **Per-pair reload when the cluster lacks a pair's candles**, tracked by a marker that lives in the pair's partition. | The marker is lost together with the candles, so every way of losing them (cluster start, double failure, split) ends in a reload from InfluxDB instead of fresh candles overwriting stored ones. | One InfluxDB query per pair whenever ownership lands on a member without the state. |
 | **Rebalance subscribers by closing the newest** above the fair share, with a cool-down. | Long-lived connections don't move by themselves; shedding the newest disturbs established clients least, and the cool-down stops it shedding again before the reconnects are counted. | Clients must reconnect: SSE does by itself, WebSocket clients must handle close code 1013. |
 | **One InfluxDB boundary** (`PriceRepository`). | Every Flux query is in one class, where interpolated values are checked and every call is timed. | Large for a single class, but it splits naturally by measurement if it grows. |
-| **Ordered lifecycles** (`SmartLifecycle` phases). | `CandleService` loads candles before the first tick and flushes after the last; `MarketStreamManager` connects in between. Spring stops the Hazelcast member after both, so the final flush still reaches the cluster. | Startup order lives in phase numbers, so it's documented on the beans. |
+| **Ordered lifecycles** (`SmartLifecycle` phases). | `CandleService` loads candles before the first tick and flushes after the last; `MarketStreamManager` connects in between. On shutdown `PriceStreamService` stops first and closes every stream, so clients reconnect to another instance while prices still flow, instead of waiting out the web server's graceful shutdown on a silent stream. Spring stops the Hazelcast member last, so the final flush still reaches the cluster. | Startup order lives in phase numbers, so it's documented on the beans. Every deploy reconnects every client once. |
 | **Fail-closed proxy.** Startup is refused if exchange REST calls wouldn't use SOCKS. | It's a security requirement: a misconfiguration must not leak traffic around the proxy. | An XChange upgrade that changes its proxy handling can't be merged until `SocksProxyTest` passes. |
 | **`Optional` for an expected absence, exceptions for failures.** `PriceService.current` is empty while no exchange has a fresh price; `aggregate` throws `PriceUnavailableException` for REST, which maps it to 503. | "No price yet" is routine at startup and for quiet pairs. Streams and candles check it on every update, where throwing would capture a stack trace each time. | Two methods for one computation. |
 | **Injected `Clock`.** | Tests control time (staleness, period boundaries, throttling with `TestScheduler`). | Every time-dependent bean takes a constructor argument. |

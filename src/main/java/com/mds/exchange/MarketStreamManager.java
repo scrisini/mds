@@ -53,6 +53,9 @@ public class MarketStreamManager implements SmartLifecycle {
     private record Connection(StreamingExchange exchange, List<MarketPair> pairs) {
     }
 
+    /** See {@link #getPhase()}. */
+    public static final int PHASE = DEFAULT_PHASE - 1;
+
     private final MdsProperties properties;
     private final QuoteBook quoteBook;
     private final Map<String, Connection> connections = new ConcurrentHashMap<>();
@@ -107,6 +110,12 @@ public class MarketStreamManager implements SmartLifecycle {
     @Override
     public boolean isRunning() {
         return running;
+    }
+
+    /** Stops after the real-time streams ({@code PriceStreamService}) have sent their clients elsewhere. */
+    @Override
+    public int getPhase() {
+        return PHASE;
     }
 
     /** Connects and subscribes asynchronously; returns immediately. */
