@@ -1,5 +1,6 @@
 package com.mds.web;
 
+import java.time.Clock;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.List;
@@ -28,9 +29,11 @@ public class HistoryController {
     private static final int MAX_LIMIT = 10_000;
 
     private final PriceRepository repository;
+    private final Clock clock;
 
-    public HistoryController(PriceRepository repository) {
+    public HistoryController(PriceRepository repository, Clock clock) {
         this.repository = repository;
+        this.clock = clock;
     }
 
     @GetMapping
@@ -40,7 +43,7 @@ public class HistoryController {
             @RequestParam @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME) Optional<Instant> to,
             @RequestParam Optional<String> window,
             @RequestParam(defaultValue = "1000") int limit) {
-        Range range = Range.of(from, to);
+        Range range = Range.of(from, to, clock.instant());
         return repository.findAggregates(MarketPair.parse(pair), range.from(), range.to(), window, checked(limit));
     }
 
@@ -52,7 +55,7 @@ public class HistoryController {
             @RequestParam @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME) Optional<Instant> to,
             @RequestParam Optional<String> window,
             @RequestParam(defaultValue = "1000") int limit) {
-        Range range = Range.of(from, to);
+        Range range = Range.of(from, to, clock.instant());
         return repository.findTickers(MarketPair.parse(pair), exchange.map(String::toLowerCase),
                 range.from(), range.to(), window, checked(limit));
     }
@@ -66,8 +69,8 @@ public class HistoryController {
 
     private record Range(Instant from, Instant to) {
 
-        static Range of(Optional<Instant> from, Optional<Instant> to) {
-            Instant end = to.orElseGet(Instant::now);
+        static Range of(Optional<Instant> from, Optional<Instant> to, Instant now) {
+            Instant end = to.orElse(now);
             Instant start = from.orElse(end.minus(DEFAULT_RANGE));
             if (!start.isBefore(end)) {
                 throw new IllegalArgumentException("'from' must be before 'to'");
