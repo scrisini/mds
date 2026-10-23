@@ -148,45 +148,10 @@ public class PriceStreamService {
         if (!priceService.pairs().contains(pair)) {
             throw new PairNotSubscribedException(pair, priceService.pairs());
         }
-        AtomicInteger transportCount = subscribersByTransport.get(transport);
-        if (transportCount == null) {
-            throw new IllegalArgumentException("unknown transport " + transport);
-        }
-        if (subscribers.incrementAndGet() > settings.maxSubscribers()) {
-            subscribers.decrementAndGet();
-            throw new StreamCapacityException(settings.maxSubscribers());
-        }
-        transportCount.incrementAndGet();
-
-        Counter events = Counter.builder("mds.stream.events")
-                .description("Price events sent to real-time subscribers")
-                .tag("pair", pair.symbol())
-                .tag("transport", transport)
-                .register(registry);
-        CompositeDisposable disposable = new CompositeDisposable();
-        AtomicBoolean closed = new AtomicBoolean();
-        StreamSubscription subscription = new StreamSubscription() {
-            @Override
-            public MarketPair pair() {
-                return pair;
-            }
-
-            @Override
-            public StreamRate rate() {
-                return rate;
-            }
-
-            @Override
-            public void close() {
-                if (closed.compareAndSet(false, true)) {
-                    disposable.dispose();
-                    subscribers.decrementAndGet();
-                    transportCount.decrementAndGet();
-                    log.debug("{} subscription for {} closed", transport, pair);
-                }
-            }
-        };
-        disposable.add(updates(pair, rate).subscribe(
+        AtomicInteger transportCount = reserveSlot(transport);
+        Counter events = eventsCounter(pair, transport);
+        Subscription subscription = new Subscription(pair, rate, transport, transportCount);
+        subscription.disposable.add(updates(pair, rate).subscribe(
                 price -> {
                     onPrice.accept(price);
                     events.increment();
@@ -197,6 +162,31 @@ public class PriceStreamService {
                 }));
         log.debug("{} subscription for {} opened at {}", transport, pair, rate);
         return subscription;
+    }
+
+    /**
+     * Takes one of the {@code mds.stream.max-subscribers} slots and counts it for the transport.
+     * Returns the transport's count, which {@link Subscription#close} decrements.
+     */
+    private AtomicInteger reserveSlot(String transport) {
+        AtomicInteger transportCount = subscribersByTransport.get(transport);
+        if (transportCount == null) {
+            throw new IllegalArgumentException("unknown transport " + transport);
+        }
+        if (subscribers.incrementAndGet() > settings.maxSubscribers()) {
+            subscribers.decrementAndGet();
+            throw new StreamCapacityException(settings.maxSubscribers());
+        }
+        transportCount.incrementAndGet();
+        return transportCount;
+    }
+
+    private Counter eventsCounter(MarketPair pair, String transport) {
+        return Counter.builder("mds.stream.events")
+                .description("Price events sent to real-time subscribers")
+                .tag("pair", pair.symbol())
+                .tag("transport", transport)
+                .register(registry);
     }
 
     /**
@@ -225,19 +215,11 @@ public class PriceStreamService {
             changes = changes.throttleLatest(rate.minInterval().toNanos(), TimeUnit.NANOSECONDS,
                     throttleScheduler, true);
         }
+        // skipped while no exchange has a fresh quote
         return changes
                 .toFlowable(BackpressureStrategy.LATEST)
                 .observeOn(sendScheduler, false, 1)
-                .concatMapMaybe(p -> Maybe.fromCallable(() -> currentAggregate(p)));
-    }
-
-    /** Null (skipped) while no exchange has a fresh quote. */
-    private AggregatedPrice currentAggregate(MarketPair pair) {
-        try {
-            return priceService.aggregate(pair);
-        } catch (PriceUnavailableException e) {
-            return null;
-        }
+                .concatMapMaybe(p -> Maybe.fromOptional(priceService.current(p)));
     }
 
     private static void send(SseEmitter emitter, long id, AggregatedPrice price) throws IOException {
@@ -245,6 +227,44 @@ public class PriceStreamService {
                 .id(Long.toString(id))
                 .name("price")
                 .data(price, MediaType.APPLICATION_JSON));
+    }
+
+    /** An open subscription; closing it stops its updates and frees its slot, once. */
+    private final class Subscription implements StreamSubscription {
+
+        private final MarketPair pair;
+        private final StreamRate rate;
+        private final String transport;
+        private final AtomicInteger transportCount;
+        private final CompositeDisposable disposable = new CompositeDisposable();
+        private final AtomicBoolean closed = new AtomicBoolean();
+
+        Subscription(MarketPair pair, StreamRate rate, String transport, AtomicInteger transportCount) {
+            this.pair = pair;
+            this.rate = rate;
+            this.transport = transport;
+            this.transportCount = transportCount;
+        }
+
+        @Override
+        public MarketPair pair() {
+            return pair;
+        }
+
+        @Override
+        public StreamRate rate() {
+            return rate;
+        }
+
+        @Override
+        public void close() {
+            if (closed.compareAndSet(false, true)) {
+                disposable.dispose();
+                subscribers.decrementAndGet();
+                transportCount.decrementAndGet();
+                log.debug("{} subscription for {} closed", transport, pair);
+            }
+        }
     }
 
     /** Receives each aggregate; may throw to end the subscription (e.g. the client went away). */

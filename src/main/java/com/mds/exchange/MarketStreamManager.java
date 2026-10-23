@@ -2,6 +2,8 @@ package com.mds.exchange;
 
 import java.net.Proxy;
 import java.time.Duration;
+import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
@@ -55,6 +57,7 @@ public class MarketStreamManager implements SmartLifecycle {
     private final QuoteBook quoteBook;
     private final Map<String, Connection> connections = new ConcurrentHashMap<>();
     private final CompositeDisposable subscriptions = new CompositeDisposable();
+    private volatile Map<MarketPair, List<String>> exchangesByPair = Map.of();
     private volatile boolean running;
 
     public MarketStreamManager(MdsProperties properties, QuoteBook quoteBook) {
@@ -69,18 +72,23 @@ public class MarketStreamManager implements SmartLifecycle {
         List<MarketPair> pairs = properties.pairs().stream().map(MarketPair::parse).toList();
         for (String id : properties.exchanges()) {
             SupportedExchange.fromId(id).ifPresentOrElse(
-                    supported -> create(supported).ifPresent(exchange -> {
-                        try {
-                            attach(supported.id(), exchange, listedPairs(supported.id(), exchange, pairs),
-                                    supported.lastPriceFromTrades());
-                        } catch (RuntimeException e) {
-                            LogEvent.EXCHANGE_START_FAILED.at(log).with("exchange", supported.id()).cause(e).log();
-                        }
-                    }),
+                    supported -> start(supported, pairs),
                     () -> LogEvent.EXCHANGE_UNSUPPORTED.at(log).with("exchange", id)
                             .with("supported", SupportedExchange.ids()).log());
         }
         running = true;
+    }
+
+    /** Creates the exchange and starts streaming the configured pairs it lists; failures leave it out. */
+    private void start(SupportedExchange supported, List<MarketPair> pairs) {
+        create(supported).ifPresent(exchange -> {
+            try {
+                attach(supported.id(), exchange, listedPairs(supported.id(), exchange, pairs),
+                        supported.lastPriceFromTrades());
+            } catch (RuntimeException e) {
+                LogEvent.EXCHANGE_START_FAILED.at(log).with("exchange", supported.id()).cause(e).log();
+            }
+        });
     }
 
     @Override
@@ -102,22 +110,15 @@ public class MarketStreamManager implements SmartLifecycle {
     }
 
     /** Connects and subscribes asynchronously; returns immediately. */
-    void attach(String id, StreamingExchange exchange, List<MarketPair> pairs, boolean lastPriceFromTrades) {
+    synchronized void attach(String id, StreamingExchange exchange, List<MarketPair> pairs, boolean lastPriceFromTrades) {
         if (pairs.isEmpty()) {
             LogEvent.EXCHANGE_NO_CONFIGURED_PAIRS.at(log).with("exchange", id).log();
             return;
         }
         connections.put(id, new Connection(exchange, pairs));
+        exchangesByPair = indexByPair(connections);
 
-        ProductSubscription.ProductSubscriptionBuilder subscription = ProductSubscription.create();
-        for (MarketPair pair : pairs) {
-            subscription.addTicker(pair.toCurrencyPair());
-            if (lastPriceFromTrades) {
-                subscription.addTrades(pair.toCurrencyPair());
-            }
-        }
-
-        ProductSubscription products = subscription.build();
+        ProductSubscription products = products(pairs, lastPriceFromTrades);
         subscriptions.add(Completable.defer(() -> exchange.connect(products))
                 .doOnError(e -> LogEvent.EXCHANGE_CONNECT_FAILED.at(log).with("exchange", id)
                         .with("retry_in", delay()).with("reason", e.getMessage()).log())
@@ -135,13 +136,9 @@ public class MarketStreamManager implements SmartLifecycle {
         return connections.containsKey(id);
     }
 
-    /** Exchanges that have a subscription for the pair. */
+    /** Exchanges that have a subscription for the pair, sorted by id. */
     public List<String> exchangesFor(MarketPair pair) {
-        return connections.entrySet().stream()
-                .filter(e -> e.getValue().pairs().contains(pair))
-                .map(Map.Entry::getKey)
-                .sorted()
-                .toList();
+        return exchangesByPair.getOrDefault(pair, List.of());
     }
 
     public List<ExchangeStatus> status() {
@@ -180,6 +177,31 @@ public class MarketStreamManager implements SmartLifecycle {
                 .doOnComplete(() -> LogEvent.EXCHANGE_STREAM_ENDED.at(log).with("exchange", id).with("pair", pair)
                         .with("channel", channel).with("retry_in", delay()).log())
                 .repeatWhen(completions -> completions.delay(delay().toMillis(), TimeUnit.MILLISECONDS));
+    }
+
+    private static ProductSubscription products(List<MarketPair> pairs, boolean lastPriceFromTrades) {
+        ProductSubscription.ProductSubscriptionBuilder subscription = ProductSubscription.create();
+        for (MarketPair pair : pairs) {
+            subscription.addTicker(pair.toCurrencyPair());
+            if (lastPriceFromTrades) {
+                subscription.addTrades(pair.toCurrencyPair());
+            }
+        }
+        return subscription.build();
+    }
+
+    /**
+     * Exchange ids per pair, sorted. Aggregation looks this up on every price change, so it's
+     * built once per connection change rather than filtered and sorted per lookup.
+     */
+    private static Map<MarketPair, List<String>> indexByPair(Map<String, Connection> connections) {
+        Map<MarketPair, List<String>> index = new HashMap<>();
+        connections.entrySet().stream()
+                .sorted(Map.Entry.comparingByKey())
+                .forEach(e -> e.getValue().pairs().forEach(
+                        pair -> index.computeIfAbsent(pair, p -> new ArrayList<>()).add(e.getKey())));
+        index.replaceAll((pair, ids) -> List.copyOf(ids));
+        return Map.copyOf(index);
     }
 
     private Optional<StreamingExchange> create(SupportedExchange supported) {

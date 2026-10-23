@@ -17,7 +17,7 @@ public final class EventLog {
 
     EventLog(Logger logger, LogEvent event) {
         this.builder = logger.atLevel(event.level())
-                .setMessage("[" + event.code() + "] " + event.summary())
+                .setMessage(event.message())
                 .addKeyValue(LogFields.EVENT_CODE, event.code())
                 .addKeyValue(LogFields.EVENT_REFERENCE, event.reference());
     }

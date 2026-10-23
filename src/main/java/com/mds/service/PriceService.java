@@ -43,36 +43,27 @@ public class PriceService {
     /**
      * Aggregate over every exchange streaming the pair. Exchanges with no update yet, or
      * none within {@code mds.stale-after}, are reported as failures instead.
+     *
+     * @throws PriceUnavailableException if no exchange has a fresh price
      */
     public AggregatedPrice aggregate(MarketPair pair) {
-        requireSubscribed(pair);
-        Instant now = clock.instant();
-        Instant freshAfter = now.minus(staleAfter);
-
-        List<PriceQuote> quotes = new ArrayList<>();
         List<QuoteFailure> failures = new ArrayList<>();
-        for (String exchange : streams.exchangesFor(pair)) {
-            Optional<PriceQuote> quote = quoteBook.latest(exchange, pair);
-            if (quote.isEmpty()) {
-                failures.add(new QuoteFailure(exchange, "awaiting first update"));
-            } else if (quote.get().timestamp().isBefore(freshAfter)) {
-                failures.add(new QuoteFailure(exchange, "stale, last update " + quote.get().timestamp()));
-            } else {
-                quotes.add(quote.get());
-            }
-        }
-        return aggregator.aggregate(pair, quotes, failures, now);
+        return current(pair, failures).orElseThrow(() -> new PriceUnavailableException(pair, failures));
+    }
+
+    /**
+     * {@link #aggregate}, empty while no exchange has a fresh price. For callers that skip a
+     * missing price on every update (streams, candles), where an exception would cost a stack trace.
+     */
+    public Optional<AggregatedPrice> current(MarketPair pair) {
+        return current(pair, new ArrayList<>());
     }
 
     /** Aggregates for all subscribed pairs that currently have at least one fresh quote. */
     public List<AggregatedPrice> aggregates() {
         List<AggregatedPrice> results = new ArrayList<>();
         for (MarketPair pair : pairs) {
-            try {
-                results.add(aggregate(pair));
-            } catch (PriceUnavailableException e) {
-                // no fresh quote yet; omitted until one arrives
-            }
+            current(pair).ifPresent(results::add);
         }
         return results;
     }
@@ -87,6 +78,25 @@ public class PriceService {
         return quoteBook.latest(id, pair).orElseThrow(() -> new PriceUnavailableException(pair,
                 List.of(new QuoteFailure(id, streams.exchangesFor(pair).contains(id)
                         ? "awaiting first update" : "pair not listed on this exchange"))));
+    }
+
+    /** Aggregates the pair's fresh quotes, adding an entry to {@code failures} for each exchange left out. */
+    private Optional<AggregatedPrice> current(MarketPair pair, List<QuoteFailure> failures) {
+        requireSubscribed(pair);
+        Instant now = clock.instant();
+        Instant freshAfter = now.minus(staleAfter);
+        List<PriceQuote> quotes = new ArrayList<>();
+        for (String exchange : streams.exchangesFor(pair)) {
+            Optional<PriceQuote> quote = quoteBook.latest(exchange, pair);
+            if (quote.isEmpty()) {
+                failures.add(new QuoteFailure(exchange, "awaiting first update"));
+            } else if (quote.get().timestamp().isBefore(freshAfter)) {
+                failures.add(new QuoteFailure(exchange, "stale, last update " + quote.get().timestamp()));
+            } else {
+                quotes.add(quote.get());
+            }
+        }
+        return aggregator.aggregate(pair, quotes, failures, now);
     }
 
     private void requireSubscribed(MarketPair pair) {

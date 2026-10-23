@@ -1,7 +1,6 @@
 package com.mds.service;
 
 import static org.assertj.core.api.Assertions.assertThat;
-import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
 import java.time.Instant;
 import java.util.List;
@@ -27,7 +26,7 @@ class PriceAggregatorTest {
                 quote("kraken", "102", "101.5", "103", "1"),
                 quote("bitstamp", "104", "103", "100.5", null));
 
-        AggregatedPrice result = aggregator.aggregate(BTC_USDT, quotes, List.of(), NOW);
+        AggregatedPrice result = aggregator.aggregate(BTC_USDT, quotes, List.of(), NOW).orElseThrow();
 
         assertThat(result.sources()).isEqualTo(3);
         assertThat(result.mean()).isEqualTo(Decimal.parse("102"));
@@ -50,7 +49,7 @@ class PriceAggregatorTest {
                 quote("c", "20", null, null, null),
                 quote("d", "30", null, null, null));
 
-        AggregatedPrice result = aggregator.aggregate(BTC_USDT, quotes, List.of(), NOW);
+        AggregatedPrice result = aggregator.aggregate(BTC_USDT, quotes, List.of(), NOW).orElseThrow();
 
         assertThat(result.median()).isEqualTo(Decimal.parse("25"));
         assertThat(result.vwap()).isNull();
@@ -58,13 +57,25 @@ class PriceAggregatorTest {
     }
 
     @Test
-    void failsWhenNoQuoteHasALastPrice() {
+    void isEmptyWhenNoQuoteHasALastPrice() {
         List<QuoteFailure> failures = List.of(new QuoteFailure("kraken", "timed out"));
 
-        assertThatThrownBy(() -> aggregator.aggregate(BTC_USDT, List.of(), failures, NOW))
-                .isInstanceOf(PriceUnavailableException.class)
-                .extracting(e -> ((PriceUnavailableException) e).failures())
-                .isEqualTo(failures);
+        assertThat(aggregator.aggregate(BTC_USDT, List.of(quote("binance", null, "99", "101", "3")), failures, NOW))
+                .isEmpty();
+    }
+
+    @Test
+    void bestBidAndAskSkipMissingAndNonPositiveValuesAndKeepTheFirstOnATie() {
+        List<PriceQuote> quotes = List.of(
+                quote("a", "100", null, "0", null),
+                quote("b", "100", "99", "101", null),
+                quote("c", "100", "99", "101", null),
+                quote("d", "100", "-1", null, null));
+
+        AggregatedPrice result = aggregator.aggregate(BTC_USDT, quotes, List.of(), NOW).orElseThrow();
+
+        assertThat(result.bestBidExchange()).isEqualTo("b");
+        assertThat(result.bestAskExchange()).isEqualTo("b");
     }
 
     private static PriceQuote quote(String exchange, String last, String bid, String ask, String volume) {
