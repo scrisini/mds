@@ -43,7 +43,8 @@ class PriceWebSocketHandlerTest {
 
     private static final MarketPair BTC_USDT = MarketPair.parse("BTC-USDT");
 
-    private final QuoteBook book = new QuoteBook(Clock.fixed(Instant.parse("2026-10-21T12:00:00Z"), ZoneOffset.UTC));
+    private final QuoteBook book = new QuoteBook(Clock.fixed(Instant.parse("2026-10-21T12:00:00Z"), ZoneOffset.UTC),
+            new SimpleMeterRegistry());
     private final JsonMapper json = JsonMapper.builder().build();
     private final WebSocketSession session = mock(WebSocketSession.class);
     private final TestScheduler time = new TestScheduler();

@@ -134,6 +134,10 @@ management:
       percentiles:
         http.server.requests: 0.5,0.95,0.99
         mds.influx: 0.5,0.95,0.99
+        # receipt of an exchange update -> handed to a subscriber; rate slot -> handed over; -> candles
+        mds.stream.latency: 0.5,0.95,0.99
+        mds.stream.queue: 0.5,0.95,0.99
+        mds.candles.lag: 0.5,0.95,0.99
 
 # /actuator/info
 info:

@@ -21,6 +21,7 @@ import com.mds.model.AggregatedPrice;
 import com.mds.model.MarketPair;
 import com.mds.model.QuoteFailure;
 import com.mds.support.TestClusters;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.assertj.core.api.InstanceOfAssertFactories;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -32,7 +33,7 @@ class PriceServiceTest {
 
     private final MarketStreamManager streams = mock(MarketStreamManager.class);
     private final Clock clock = mock(Clock.class);
-    private final QuoteBook book = new QuoteBook(clock);
+    private final QuoteBook book = new QuoteBook(clock, new SimpleMeterRegistry());
     private PriceService service;
 
     @BeforeEach

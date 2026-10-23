@@ -14,6 +14,8 @@ import com.mds.model.MarketPair;
 import com.mds.model.PriceQuote;
 import com.mds.model.QuoteUpdate;
 import io.reactivex.rxjava3.core.Observable;
+import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.MeterRegistry;
 import io.reactivex.rxjava3.subjects.PublishSubject;
 import io.reactivex.rxjava3.subjects.Subject;
 import lombok.extern.slf4j.Slf4j;
@@ -36,14 +38,17 @@ public class QuoteBook {
     }
 
     private final Clock clock;
+    private final MeterRegistry registry;
+    private final Map<String, Counter> receivedByExchange = new ConcurrentHashMap<>();
     private final Map<Key, PriceQuote> quotes = new ConcurrentHashMap<>();
     private final Map<String, Instant> lastUpdate = new ConcurrentHashMap<>();
     private final Set<String> reportedOverflows = ConcurrentHashMap.newKeySet();
     // serialized: onNext is called concurrently from several exchanges' threads
     private final Subject<QuoteUpdate> updates = PublishSubject.<QuoteUpdate>create().toSerialized();
 
-    public QuoteBook(Clock clock) {
+    public QuoteBook(Clock clock, MeterRegistry registry) {
         this.clock = clock;
+        this.registry = registry;
     }
 
     public void onTicker(String exchange, MarketPair pair, Ticker ticker) {
@@ -84,7 +89,16 @@ public class QuoteBook {
     private void apply(PriceQuote update, MarketPair pair) {
         PriceQuote merged = quotes.merge(new Key(update.exchange(), pair), update, PriceQuote::mergedWith);
         lastUpdate.put(update.exchange(), update.timestamp());
-        updates.onNext(new QuoteUpdate(pair, merged));
+        received(update.exchange()).increment();
+        updates.onNext(new QuoteUpdate(pair, merged, System.nanoTime()));
+    }
+
+    /** One counter per exchange, registered on its first update. */
+    private Counter received(String exchange) {
+        return receivedByExchange.computeIfAbsent(exchange, id -> Counter.builder("mds.quotes.received")
+                .description("Quote updates received from exchanges")
+                .tag("exchange", id)
+                .register(registry));
     }
 
     private Decimal convert(String exchange, String field, BigDecimal value) {

@@ -40,7 +40,9 @@ Suggested alerts:
 - the `mds.cluster.members` gauge below the number of instances deployed (instances that didn't
   join split the candles);
 - `MDS-1016`, or the `mds.config.restartable` gauge at 0 (the stored configuration would stop the
-  next restart: fix it before deploying).
+  next restart: fix it before deploying);
+- `mds.stream.queue` p99 above 100 ms, or `mds.candles.lag` p99 above 1 s, for 5 minutes
+  (subscribers or candles are falling behind: see README "Capacity" and add instances or cores).
 
 Useful health checks: `GET /actuator/health` (InfluxDB and the cluster), `GET /api/v1/exchanges`
 (each exchange's connection state and last update).

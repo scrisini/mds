@@ -33,6 +33,8 @@ EKS behind an ALB), see [`docs/deployment.md`](docs/deployment.md).
 | **Operations** | | |
 | Coded logs and runbook | Every operational log line has a stable code (`MDS-nnnn`) with a procedure in the runbook, JSON logs in the Elastic Common Schema, and a request id on every response | [Logging and support](#logging-and-support) |
 | Metrics and health | Micrometer meters (with a `mode` tag), health per dependency, and liveness and readiness probes | [Metrics](#metrics) |
+| Latency tracking | Times every event from receipt of the exchange update to the subscriber, the internal queueing delay, and the candle lag (`mds.stream.latency`, `mds.stream.queue`, `mds.candles.lag`) | [Latency](#latency) |
+| Capacity management | Measured cost per exchange, pair and subscriber, and a rule for how many instances and cores a load needs | [Capacity](#capacity) |
 | **Engineering** | | |
 | Design standards | Written rules on object granularity, one purpose per method, and code the JIT and GC handle well, with this service's decisions | [Design](#design) |
 | Releases | Conventional Commits checked by a hook and in CI; semantic-release tags and publishes each release from `main` | [Contributing](#contributing) |
@@ -714,8 +716,12 @@ Micrometer meters, visible at `/actuator/metrics/{name}` and tagged `application
 | `mds.influx.points` | counter | `measurement` |
 | `mds.influx.query` | timer, p50/p95/p99 | `measurement`, `outcome` |
 | `mds.influx.query.rows` | distribution | `measurement` |
+| `mds.quotes.received` | counter | `exchange`: quote updates received; the input rate everything else scales with |
 | `mds.stream.subscribers` | gauge | `transport` (`sse`/`websocket`) |
 | `mds.stream.events` | counter | `pair`, `transport` |
+| `mds.stream.latency` | timer, p50/p95/p99 | `transport`: from receiving an exchange update to handing the event to the subscriber's connection ([Latency](#latency)) |
+| `mds.stream.queue` | timer, p50/p95/p99 | `transport`: from a subscriber's rate letting an event go to handing it over: the internal delay |
+| `mds.candles.lag` | timer, p50/p95/p99 | from receiving an update to applying it to this member's candles |
 | `mds.stream.rebalanced` | counter | subscriptions closed so their clients reconnect to a quieter instance |
 | `mds.cluster.members` | gauge | instances in the cluster, this one included |
 
@@ -725,7 +731,112 @@ curl 'localhost:8080/actuator/metrics/mds.influx.write?tag=outcome:error'
 ```
 
 For SSE requests `http.server.requests` measures the whole connection; WebSocket traffic isn't
-in `http.server.requests`, so use `mds.stream.*` for it.
+in `http.server.requests`, so use `mds.stream.*` for it. Every meter is also tagged `mode`.
+
+### Latency
+
+Each quote update is stamped when mds receives it from the exchange. Three timers follow it:
+
+```
+exchange ──► received ──► rate slot opens ──► handed to the connection        (mds.stream.latency)
+                          └──────────── mds.stream.queue ────────────┘
+             received ──► applied to candles                                   (mds.candles.lag)
+```
+
+- **`mds.stream.latency`** is what a client experiences inside mds. For a throttled client it
+  includes the wait for its next slot (up to 1 s at `rate=1`), so compare it per rate, and read
+  `mds.stream.queue` for delays.
+- **`mds.stream.queue`** should stay in the low milliseconds. When it grows, sends are waiting:
+  too few CPU cores for the subscribers, slow clients, or a full network. A stream never builds a
+  backlog (it keeps only the latest state), so growth shows here as time rather than as a longer
+  queue.
+- **`mds.candles.lag`** covers the one queue in mds that can grow: candle updates wait for a
+  single thread, then for the cluster. A rising lag means candles fall behind the market.
+- Time is measured with the JVM's monotonic clock, so it's unaffected by clock changes. Time spent
+  before mds receives an update (the exchange, the network, the proxy) isn't included.
+- Percentiles are per instance, over the last two minutes. Compare instances rather than adding
+  them up.
+
+```bash
+curl 'localhost:8080/actuator/metrics/mds.stream.queue.percentile?tag=phi:0.99&tag=transport:sse'
+curl 'localhost:8080/actuator/metrics/mds.candles.lag'
+```
+
+## Capacity
+
+How much one instance can carry, measured, and how to size a deployment from three inputs: the
+exchanges, the pairs and the subscribers.
+
+**What was measured.** One instance against the live exchanges (5 exchanges × 4 pairs, the
+defaults), with SSE subscribers spread evenly over the pairs, 60 s per scenario after a warm-up,
+reading `/actuator/metrics`. On an Apple M3 Pro (12 cores), with the load generator
+(`scripts/load-sse.mjs`) on the same machine. JVM heap capped at 1 GiB. Archiving was off and
+InfluxDB unreachable, so database writes aren't included.
+
+| Subscribers × rate | Events out/s | CPU (cores) | Heap | Egress | Latency p50 / p99 | Queue p50 / p99 | Candle lag p99 |
+|---|---|---|---|---|---|---|---|
+| none | 0 | 0.10 | 88 MiB | – | – | – | 1.4 ms |
+| 500 × 1/s | 500 | 0.17 | 173 MiB | 0.6 MB/s | 57 / 537 ms | 0.5 / 3.0 ms | 1.9 ms |
+| 500 × 10/s | 4,309 | 0.51 | 147 MiB | 4.9 MB/s | 30 / 101 ms | 0.3 / 2.9 ms | 6.3 ms |
+| 1,000 × 10/s | 8,401 | 0.70 | 100 MiB | 9.8 MB/s | 26 / 105 ms | 0.3 / 3.8 ms | 8.9 ms |
+| 2,000 × 10/s | 16,874 | 1.15 | 240 MiB | 19.7 MB/s | 29 / 101 ms | 0.4 / 3.4 ms | 6.8 ms |
+| 4,000 × 10/s | 33,926 | 1.82 | 519 MiB | 39.8 MB/s | 29 / 101 ms | 0.5 / 5.5 ms | 12.1 ms |
+| 1,000 × every change | 10,649 | 0.75 | 155 MiB | 12.6 MB/s | 1.2 / 5.0 ms | 1.0 / 4.5 ms | 10.0 ms |
+
+What it shows:
+
+- **Input:** the 5 exchanges sent 41 updates/s for 4 pairs, about 2/s per exchange and pair, but
+  very unevenly (KuCoin and Bitstamp about 9/s, Bitfinex under 0.5/s). A pair changed about
+  10.6 times a second across all exchanges, so `rate=10` delivered about 8.5 events/s per subscriber,
+  not 10.
+- **CPU follows events out**, not subscribers: about 0.06 cores per 1,000 events/s at scale (more
+  per event at low load), on top of 0.1 cores for the exchange streams and candles.
+- **Egress is the first limit.** Each SSE event is about 1.2 KB, so 4,000 subscribers at
+  `rate=10` need about 320 Mbit/s from one instance.
+- **Delays stayed low.** `mds.stream.queue` p99 stayed under 6 ms up to 34,000 events/s.
+  `mds.stream.latency` is about half the rate's interval by design (a client at `rate=10` waits up
+  to 100 ms for its next slot); with every change sent it was 5 ms at p99.
+- **Memory:** about 0.1 MiB of heap per subscriber, on top of about 100 MiB.
+
+**Sizing rules**
+
+```
+events out/s     = Σ subscribers × min(rate, changes per second of their pair)       (≈ 10.6/s here)
+cores            ≈ 0.1 + 0.06 × events out/s ÷ 1,000          → vCPUs ≈ 2 × cores
+egress           ≈ 1.2 KB × events out/s                       (SSE; WebSocket is similar)
+heap             ≈ 100 MiB + 0.1 MiB × subscribers             → container memory ≈ heap + 650 MiB
+per instance     = total ÷ (instances − instances in one AZ)    (still enough after losing an AZ)
+```
+
+- **Size for losing an availability zone:** with 3 instances (one per AZ), each must carry half
+  the total. Set `mds.stream.max-subscribers` (default 1,000) to at least that share, or the
+  survivors refuse the reconnecting clients.
+- **vCPUs ≈ 2 × cores:** cloud vCPUs are slower than these laptop cores, and the margin also
+  covers spikes. Replace the factor with a measurement on the target instance type.
+- **More exchanges and pairs** raise the input rate, which every instance processes (each
+  streams every exchange), and the changes per second of each pair, which raises what `rate=unlimited`
+  subscribers receive. Up to 20 exchange-pairs it cost 0.1 cores. Beyond that it hasn't been
+  measured: watch `mds.candles.lag`, and measure before going much further.
+
+**Worked examples** (3 instances, one per AZ, each sized for half the load)
+
+| Assumptions | Per instance after losing an AZ | Suggested task |
+|---|---|---|
+| 5 exchanges × 4 pairs, 1,000 subscribers at `rate=1` | 500 subscribers, 500 events/s: 0.13 cores, 0.6 MB/s, 150 MiB heap | 1 vCPU, 2 GiB (the `deploy/` default) |
+| 5 exchanges × 4 pairs, 5,000 subscribers at `rate=10` | 2,500 subscribers, 21,000 events/s: 1.4 cores (2.8 vCPUs), 25 MB/s (200 Mbit/s), 350 MiB heap; `max-subscribers` ≥ 2,500 | 4 vCPU, 2 GiB |
+| 10 exchanges × 20 pairs, 20,000 subscribers at `rate=10` | With 6 instances (2 per AZ), 5,000 subscribers each after losing an AZ; with 10 exchanges a pair changes more than 10 times a second, so 10 events/s each: 50,000 events/s, 3.1 cores (6.2 vCPUs), 60 MB/s (480 Mbit/s), 600 MiB heap | 8 vCPU, 4 GiB; beyond what was measured, so load-test first |
+
+**Measuring again** (on the target instance type, or after a change to the stream path):
+
+```bash
+scripts/dev.sh run --mds.stream.max-subscribers=20000 --mds.instance=agent
+node scripts/load-sse.mjs 2000 10 60     # subscribers, rate, seconds; prints events/s and KB/s
+curl -s 'localhost:8080/actuator/metrics/process.cpu.usage'
+curl -s 'localhost:8080/actuator/metrics/mds.stream.queue.percentile?tag=phi:0.99&tag=transport:sse'
+```
+
+Restart between runs: the percentiles cover the last two minutes, so a previous scenario would
+mix in.
 
 ## InfluxDB schema
 
@@ -885,6 +996,10 @@ The next candidates, each needing a decision before changing:
   send.
 - **Every subscriber's filter sees every pair's updates.** A subject per pair would route
   updates directly.
+- **Latency timing costs one small object per event sent** (`Release`: when the update arrived and
+  when the rate let it go) and two timer records. Updates pass through the throttle as they are,
+  so nothing is allocated for updates a throttled subscriber skips. The measured cost is included
+  in [Capacity](#capacity).
 
 To measure, start InfluxDB (`scripts/dev.sh infra`) and record a run with JFR, skipping the
 first minute so startup doesn't dominate. Put load on it while it records (real-time
