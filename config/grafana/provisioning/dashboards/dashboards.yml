@@ -1,0 +1,10 @@
+# Loads every dashboard in config/grafana/dashboards (mounted at /var/lib/grafana/dashboards).
+apiVersion: 1
+
+providers:
+  - name: mds
+    folder: mds
+    type: file
+    allowUiUpdates: true   # edit in the UI, then export the JSON back into config/grafana/dashboards
+    options:
+      path: /var/lib/grafana/dashboards
