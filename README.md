@@ -712,3 +712,277 @@ squash-only on `main` with linear history, merge-commit-only on `develop`, no fo
 deletion, and the `commitlint` check required on both. Run it without arguments to see what it
 would change, then with `--apply` (add `--create-develop` to create `develop` from `main`).
 
+For the terms, the reasoning and the commands, see [Git guide](#git-guide).
+
+
+## Git guide
+
+How we use Git day to day, written for newcomers and as a refresher for everyone else. The rules
+are in [Branching and merging](#branching-and-merging); this section explains them and lists the
+commands. Commands need Git 2.23 or later (for `git switch` and `git restore`). Pull requests use
+`gh`, GitHub's official CLI, because Git itself has no pull requests.
+
+### Terms
+
+| Term | Meaning |
+|---|---|
+| **Repository (repo)** | The project and its full history. Your clone is a complete copy. |
+| **Remote, `origin`** | The copy on GitHub. `origin/develop` is your local record of GitHub's `develop`, as of your last `git fetch`. |
+| **Commit** | A snapshot of the files plus a message, identified by a hash such as `57134e6`. Commits never change; "changing" one creates a new one with a new hash. |
+| **Branch** | A movable label pointing at a commit. Committing on a branch moves its label forward. |
+| **`HEAD`** | The commit you have checked out: usually the tip of the current branch. |
+| **Working tree, index (staging area)** | Your files on disk, and the set of changes you've marked with `git add` for the next commit. |
+| **Fetch vs pull** | `fetch` downloads new commits and updates `origin/*` without touching your files. `pull` is `fetch` followed by a merge (or rebase) into your current branch. |
+| **Merge** | Joins two lines of history. If one side is just ahead of the other, Git simply moves the label (**fast-forward**). Otherwise it creates a **merge commit** with two parents. |
+| **Squash merge** | Takes all of a branch's changes and makes **one new commit** from them on the target branch. The branch's own commits aren't part of the target's history. |
+| **Rebase** | Replays your commits on top of another commit, creating **new** commits (new hashes) with the same changes. |
+| **Conflict** | Both sides changed the same lines (or one deleted a file the other changed). Git stops and asks you to choose. |
+| **Back-merge** | Merging `main` back into `develop` after a release, so `develop`'s history contains the release commit (see below). |
+| **Tag** | A fixed label on one commit, such as `v1.0.0`. Unlike a branch, it never moves. |
+| **Pull request (PR)** | A GitHub request to merge one branch into another, with review and checks. |
+| **Force push** | Overwriting a remote branch with history that doesn't contain what's there. Never on `main` or `develop`; on your own branch, only with `--force-with-lease`. |
+
+### Merge, rebase and squash
+
+All three combine work; they differ in what history they leave. Start from this, where you
+branched `feat/x` from `develop` at `B`, and others merged `C` and `D` since:
+
+```
+develop:  A---B---C---D
+               \
+feat/x:         E---F
+```
+
+**Merge** (`git merge origin/develop` on `feat/x`, or a merge-commit PR) keeps every commit and
+adds `M`, which has two parents. Nothing is rewritten, so it's safe on branches others use.
+
+```
+develop:  A---B---C---D
+               \       \
+feat/x:         E---F---M
+```
+
+**Rebase** (`git rebase origin/develop` on `feat/x`) replays `E` and `F` on top of `D` as new
+commits `E'` and `F'`. The result is a straight line, as if you'd started from `D`.
+
+```
+develop:  A---B---C---D
+                       \
+feat/x:                 E'--F'
+```
+
+**Squash** (a squash-merge PR) turns the branch's changes into one new commit `S` on the target.
+
+```
+main:     R---S          S = E + F as one commit; E and F stay only on feat/x
+```
+
+**When to use which:**
+- **Merge to integrate.** Use it to bring `develop` into your branch, and for every PR into
+  `develop`. It never rewrites shared history, so nobody else's branch breaks.
+- **Rebase only your own, unshared commits:** commits you haven't pushed, or a branch nobody else
+  has checked out. It gives a cleaner history and lets you tidy commits before review
+  (`git rebase -i`). The golden rule is to **never rebase commits other people have**, because
+  their copies still have the old hashes and their next pull duplicates or conflicts with every
+  rebased commit. After rebasing a pushed branch, push with `--force-with-lease`, which refuses
+  if someone else pushed in the meantime.
+- **Squash for releases only** (`develop` → `main`), so semantic-release reads one commit per
+  release. Never squash into `develop`. The squashed commit has a new hash, so every branch cut
+  from the original commits would conflict with `develop` afterwards.
+
+### Back-merging
+
+A squash merge creates a commit on `main` that `develop` doesn't have:
+
+```
+main:     R-----------S            S = the release squash
+           \
+develop:    B---C---D---(new work)
+```
+
+Git compares branches by history, not by content. Without a back-merge, the next `develop` →
+`main` PR offers `B`, `C` and `D` again and conflicts on every line they touched. The back-merge
+is a merge commit `K` that makes `S` part of `develop`'s history:
+
+```
+main:     R-----------S
+           \           \
+develop:    B---C---D---K---(new work)
+```
+
+From then on, the next release PR contains only new work.
+
+- **Back-merge straight after each release, before anything else merges into `develop`.** Then
+  both sides have the same content and the merge is clean.
+- **If work landed on `develop` first,** the back-merge conflicts wherever that work changed
+  files the release also touched. If `main` holds nothing beyond the release (no hotfix), keep
+  `develop`'s side for every conflict. Check this first: `git diff <release-point> origin/main`
+  must print nothing, where `<release-point>` is the `develop` commit the release PR squashed
+  (`gh pr view <N> --json headRefOid`). With a hotfix on `main`, resolve each conflict by hand.
+
+### Tags vs branches
+
+| | Branch | Tag |
+|---|---|---|
+| Moves? | Yes, with every commit | Never |
+| Used for | Ongoing work (`develop`, `feat/x`) | Marking a release (`v1.2.0`) |
+| Created by | You | The `release` workflow (semantic-release), on `main` |
+
+- **Don't create or move release tags by hand.** semantic-release works out the next version
+  from the latest `vX.Y.Z` tag, and GitHub releases are attached to tags.
+- **To look at a release,** check out its tag: you get a *detached HEAD*, meaning no branch is
+  checked out. Commits made there belong to no branch, so create a branch first if you want to
+  change anything.
+- **A hotfix for an old release** starts from its tag: `git switch -c fix/x v1.2.0`.
+
+### Working in parallel without conflicts
+
+- **Keep branches short-lived and small.** One logical change, merged within days. Long-lived
+  branches drift and conflict.
+- **Sync with `develop` often,** at least daily and always before opening a PR:
+  `git fetch` then `git merge origin/develop`. Resolve conflicts on your branch, never in
+  `develop`.
+- **Start every branch from a fresh `develop`.** Run `git pull` on `develop` first.
+- **Never commit to `main` or `develop` directly;** the rulesets enforce this.
+- **Don't mix in unrelated changes:** reformatting, reordering imports, or files you happened to
+  open. They conflict with everyone else's work and hide the real change.
+- **Talk before touching hot files.** When two people must change the same class, agree who goes
+  first, or land a small shared refactor before both branches.
+- **One release at a time.** Whoever squashes `develop` into `main` back-merges immediately,
+  before merging anything else into `develop`.
+- **Turn on `rerere`** (below). Git then remembers how you resolved a conflict and reapplies it
+  if the same conflict comes back.
+
+### Command cheat sheet
+
+**Once per machine and per clone**
+
+```bash
+git config --global user.name "Your Name"
+git config --global user.email you@example.com
+git config --global pull.ff only        # pull never creates surprise merge commits
+git config --global fetch.prune true    # forget remote branches deleted on GitHub
+git config --global rerere.enabled true # reuse recorded conflict resolutions
+scripts/dev.sh hooks                    # in each clone: the commit-msg hook
+```
+
+**Start a change**
+
+```bash
+git switch develop
+git pull                                # fast-forward to GitHub's develop
+git switch -c feat/short-description    # or fix/…, docs/…, refactor/…
+```
+
+**Commit**
+
+```bash
+git status                              # what changed, what's staged
+git diff                                # unstaged changes; --staged for staged ones
+git add src/main/java/Foo.java          # stage explicit paths (or: git add -p to pick hunks)
+git commit                              # the hook checks the message
+git commit --amend                      # fix the last commit, only if not pushed yet
+```
+
+**Stay up to date** (daily, and before a PR)
+
+```bash
+git fetch
+git merge origin/develop                # on your branch
+# on conflict: edit the files, then
+git add <resolved files>
+git commit                              # completes the merge
+git merge --abort                       # or give up and go back
+```
+
+**Push and open a pull request**
+
+```bash
+git push -u origin feat/short-description   # first push; later just: git push
+gh pr create --base develop --fill          # title and body from your commits; edit as needed
+gh pr checks --watch                        # wait for commitlint
+gh pr merge --merge --delete-branch         # into develop: always a merge commit
+```
+
+**After your PR is merged**
+
+```bash
+git switch develop
+git pull
+git branch -d feat/short-description    # -d refuses if the branch isn't merged
+```
+
+**Release** (`develop` → `main`, then back-merge)
+
+```bash
+# the commits new since the last release; $last is the develop commit that release squashed
+git fetch
+last=$(gh pr list --base main --head develop --state merged --limit 1 \
+    --json headRefOid -q '.[0].headRefOid')
+git log --no-merges --reverse --format='* %B' "$last"..origin/develop ^origin/main \
+    > release-body.txt
+# edit release-body.txt: one Co-Authored-By per person at the end, breaking-change footers last
+gh pr create --base main --head develop --title "feat(api): <highest bump, summary>" --body ""
+gh pr merge <N> --squash --subject "<the title>" --body-file release-body.txt
+# straight after: back-merge
+git fetch
+git switch -c chore/back-merge-main origin/develop
+git merge origin/main -m "chore: back-merge main into develop"
+git push -u origin chore/back-merge-main
+gh pr create --base develop --title "chore: back-merge main into develop" --body ""
+gh pr merge --merge --delete-branch
+```
+
+**Hotfix**
+
+```bash
+git fetch
+git switch -c fix/urgent-thing origin/main
+# commit, push, then
+gh pr create --base main --fill
+gh pr merge --squash        # release, then back-merge main into develop as above
+```
+
+**Tags**
+
+```bash
+git fetch --tags
+git tag --list 'v*' --sort=-v:refname   # releases, newest first
+git show v1.0.0                         # what a release contains
+git describe --tags                     # the latest release before HEAD, e.g. v1.0.0-3-g43bc14f
+git switch --detach v1.0.0              # look around a release (detached HEAD)
+git switch -c fix/x v1.0.0              # or branch from it to change something
+```
+
+**Rebase your own, unshared branch** (optional, before review)
+
+```bash
+git fetch
+git rebase origin/develop               # replay your commits on the latest develop
+# on conflict: edit, git add <files>, git rebase --continue   (or git rebase --abort)
+git push --force-with-lease             # only on your branch, never main or develop
+```
+
+**Look around**
+
+```bash
+git log --oneline --graph --decorate -20      # recent history as a graph
+git log --oneline --no-merges "$last"..origin/develop ^origin/main  # unreleased; $last: Release
+git diff origin/develop...HEAD                # what your branch changes since it forked
+git show <hash>                               # one commit
+git blame -L 40,60 src/main/java/Foo.java     # who last changed these lines, and when
+```
+
+**Undo**
+
+| Situation | Command |
+|---|---|
+| Discard unstaged edits to a file | `git restore <file>` |
+| Unstage a file, keeping the edits | `git restore --staged <file>` |
+| Undo the last commit, keeping its changes staged (not pushed yet) | `git reset --soft HEAD~1` |
+| Undo a commit that's already pushed | `git revert <hash>`: a new commit that reverses it |
+| Put work aside to switch branches | `git stash push -m "wip"`, later `git stash pop` |
+| Find a commit you "lost" (after a reset or rebase) | `git reflog`, then `git switch -c rescue <hash>` |
+
+Prefer `revert` over `reset` for anything already pushed: `reset` rewrites history others may
+have.
