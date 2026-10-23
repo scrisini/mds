@@ -49,7 +49,7 @@ public class CandleController {
     /**
      * Stored candles, oldest first, e.g. {@code /api/v1/candles/BTC-USDT?period=day}. The
      * current period's candle is included with {@code complete=false}. {@code from} defaults to
-     * 30 days, 26 weeks, 24 months or 10 years back depending on {@code period}.
+     * 48 hours, 30 days, 26 weeks, 24 months or 10 years back depending on {@code period}.
      */
     @GetMapping
     public List<Candle> history(

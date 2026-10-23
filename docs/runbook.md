@@ -104,8 +104,8 @@ range, and the full log lines for that request id or code (including `error.stac
 ### MDS-1006: Building candles
 
 - **Level:** INFO. Normal at startup.
-- **Means:** day, week, month and year candles are being built; periods start at midnight in
-  `mds.zone`.
+- **Means:** hour, day, week, month and year candles are being built; hours start on the local
+  hour and longer periods at midnight, in `mds.zone`.
 - **Check:** the zone matches `MDS_OHLC_ZONE`. Changing the zone between runs shifts period
   boundaries for new candles only.
 
@@ -248,10 +248,10 @@ range, and the full log lines for that request id or code (including `error.stac
 <a id="mds-2001"></a>
 ### MDS-2001: Candles completed
 
-- **Level:** INFO. Normal after each period boundary (midnight in the candle zone, plus week,
-  month and year starts).
+- **Level:** INFO. Normal after each period boundary: every hour in the candle zone, with day,
+  week, month and year candles at midnight.
 - **Means:** `mds.count` candles whose periods ended were finalised and written to InfluxDB.
-- **Check:** nothing to do. If it's missing after midnight, look for [MDS-3103](#mds-3103).
+- **Check:** nothing to do. If it's missing after the hour, look for [MDS-3103](#mds-3103).
 
 <a id="mds-2002"></a>
 ### MDS-2002: Exchange value exceeds the decimal range

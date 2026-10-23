@@ -34,7 +34,7 @@ public enum LogEvent {
     EXCHANGE_UNSUPPORTED("MDS-1005", Level.WARN,
             "Configured exchange is not supported and is ignored"),
     CANDLES_STARTED("MDS-1006", Level.INFO,
-            "Building day, week, month and year candles for the index and each exchange"),
+            "Building hour, day, week, month and year candles for the index and each exchange"),
     CANDLES_RECOVERED("MDS-1007", Level.INFO,
             "Reloaded a pair's stored candles; ended and missed periods will be completed at the next flush"),
     CLUSTER_JOINED("MDS-1008", Level.INFO,
