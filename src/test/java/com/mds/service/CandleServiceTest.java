@@ -73,7 +73,7 @@ class CandleServiceTest {
                         Duration.ofMinutes(30), 10, true, List.of("*"), Duration.ofSeconds(30)),
                 new MdsProperties.DecimalSettings(8, RoundingMode.HALF_EVEN),
                 new MdsProperties.Ohlc(ZoneOffset.UTC, Duration.ofSeconds(10)),
-                new MdsProperties.SocksProxy("", 1080), CLUSTER);
+                new MdsProperties.SocksProxy("", 1080), CLUSTER, MdsProperties.Mode.DEVELOPMENT);
         MarketStreamManager streams = mock(MarketStreamManager.class);
         when(streams.exchangesFor(BTC_USD)).thenReturn(List.of("bitstamp", "kraken"));
         PriceService prices = new PriceService(streams, book, new PriceAggregator(), properties, clock);

@@ -27,6 +27,9 @@ server:
     keep-alive-timeout: ${MDS_SERVER_KEEP_ALIVE_TIMEOUT:130s}
 
 mds:
+  # production refuses settings that are unsafe there: no SSM or Vault, the development InfluxDB token,
+  # text logs, WebSocket origins '*', rate=unlimited (README "Production mode")
+  mode: ${MDS_MODE:development}
   exchanges: ${MDS_EXCHANGES:binance,kraken,bitstamp,kucoin,bitfinex}
   pairs: ${MDS_PAIRS:BTC/USDT,ETH/USDT,BTC/USD,ETH/USD}
   connection-timeout: 10s
@@ -115,14 +118,22 @@ management:
       # health checks use readiness (docs/deployment.md)
       probes:
         enabled: true
+  info:
+    env:
+      enabled: true
   metrics:
     tags:
       application: mds
+      mode: ${mds.mode}
     distribution:
       # REST API calls are timed by Spring as http.server.requests (tags: method, uri, status, outcome)
       percentiles:
         http.server.requests: 0.5,0.95,0.99
         mds.influx: 0.5,0.95,0.99
+
+# /actuator/info
+info:
+  mode: ${mds.mode}
 
 logging:
   level:

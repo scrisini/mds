@@ -49,6 +49,8 @@ public enum LogEvent {
             "Could not load configuration or secrets at startup; this instance refuses to start"),
     STREAMS_CLOSED_FOR_SHUTDOWN("MDS-1014", Level.INFO,
             "Shutting down: closed every real-time subscription so its client reconnects to another instance"),
+    PRODUCTION_SETTINGS_UNSAFE("MDS-1015", Level.ERROR,
+            "Production mode with settings that are unsafe in production; this instance refuses to start"),
 
     CANDLES_COMPLETED("MDS-2001", Level.INFO,
             "Candles for ended periods completed and written"),

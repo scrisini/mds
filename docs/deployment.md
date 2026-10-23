@@ -69,7 +69,10 @@ flowchart LR
 - **InfluxDB** holds the price history and completed candles. The open-source version runs as one
   instance; see [InfluxDB](#influxdb) for a standby in another AZ.
 - **Settings and secrets** are read once at startup, from SSM Parameter Store and Vault, over the
-  private network. Exchange traffic leaves through a NAT gateway, or through the SOCKS5 proxy where
+  private network.
+- **Production mode** (`MDS_MODE=production`, set in `deploy/`) refuses to start with settings that
+  are unsafe in production, such as the development InfluxDB token or text logs (README
+  "Production mode"). Exchange traffic leaves through a NAT gateway, or through the SOCKS5 proxy where
   that is required (`MDS_SOCKS_PROXY_HOST`).
 - **Only the ALB is public.** Only `/api/` is routed; `/actuator` (health details, metrics) is
   reachable only inside the VPC.
@@ -418,6 +421,7 @@ Either way:
   that tag.
 - [ ] `/mds/prod/` parameters in SSM and `mds/prod` secrets in Vault (README "Configuration and
   secrets"); the IAM role and Vault policy allow reading them.
+- [ ] `MDS_MODE=production` is set, and the instances start (production mode refuses unsafe settings).
 - [ ] Three instances in three AZs, and `GET /actuator/health` inside the VPC shows `members: 3`.
 - [ ] ALB: HTTPS only, `/api/` only, idle timeout 120 s, target group health on
   `/actuator/health/readiness`, deregistration delay 30 s.

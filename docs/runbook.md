@@ -187,6 +187,17 @@ range, and the full log lines for that request id or code (including `error.stac
   deregistration delay; on ECS, the deregistration delay (docs/deployment.md "Stopping an
   instance").
 
+<a id="mds-1015"></a>
+### MDS-1015: Production mode refused unsafe settings
+
+- **Level:** ERROR. The instance stops during startup.
+- **Means:** `mds.mode` is `production` (`MDS_MODE`), and `mds.violations` lists settings that are
+  unsafe there, each naming what to change: no `MDS_SSM_PATH` or `MDS_VAULT_ADDRESS`, the
+  development InfluxDB token, text logs instead of `MDS_LOG_FORMAT=ecs`, WebSocket origins `*`, or
+  `rate=unlimited` allowed.
+- **Check:** fix each listed setting in Parameter Store, Vault or the deployment's environment,
+  then start again. To run without these rules (a test environment), set `MDS_MODE=development`.
+
 ## Requests and business outcomes (2xxx)
 
 <a id="mds-2001"></a>

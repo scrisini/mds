@@ -230,6 +230,7 @@ Deployed environments take their settings from AWS SSM Parameter Store and their
 
 | Property | Env | Default |
 |---|---|---|
+| `mds.mode` | `MDS_MODE` | `development`; `production` refuses unsafe settings ([Production mode](#production-mode)) |
 | `mds.exchanges` | `MDS_EXCHANGES` | `binance,kraken,bitstamp,kucoin,bitfinex` |
 | `mds.pairs` | `MDS_PAIRS` | `BTC/USDT,ETH/USDT,BTC/USD,ETH/USD` |
 | `mds.connection-timeout` | | `10s` for metadata HTTP calls while connecting |
@@ -345,6 +346,26 @@ curl -s -H 'X-Vault-Token: dev' -d '{"data":{"mds.influx.token":"mds-dev-token"}
     http://127.0.0.1:8200/v1/secret/data/mds
 MDS_VAULT_ADDRESS=http://127.0.0.1:8200 MDS_VAULT_TOKEN=dev scripts/dev.sh run
 ```
+
+### Production mode
+
+`MDS_MODE=production` (`mds.mode`; the default is `development`) says the instance runs in
+production. It shows in the startup log ([MDS-1001](docs/runbook.md#mds-1001), `mds.mode`),
+`/actuator/info`, and as a `mode` tag on every metric.
+
+In production mode the instance **refuses to start** ([MDS-1015](docs/runbook.md#mds-1015)) with
+settings that are fine on a laptop but unsafe in production, and names each one to change:
+
+| Refused | Set instead |
+|---|---|
+| No Parameter Store or no Vault | `MDS_SSM_PATH` and `MDS_VAULT_ADDRESS` |
+| The development InfluxDB token (`mds-dev-token`), or none | `mds.influx.token` in Vault |
+| Text logs | `MDS_LOG_FORMAT=ecs` |
+| WebSocket connections from any browser origin | `MDS_STREAM_ALLOWED_ORIGINS=https://app.example.com,…` |
+| `rate=unlimited` allowed | `MDS_STREAM_ALLOW_UNTHROTTLED=false` |
+
+Staging and test environments that need the development
+defaults run in `development` mode.
 
 ### Secrets in git (SOPS)
 
@@ -649,7 +670,8 @@ as the candle changes. The compose bucket has infinite retention.
 ```
 com.mds
 ├── cluster/       Hazelcast member (ClusterConfig), Cluster (pair ownership, shared maps), health
-├── config/        properties, InfluxDB client, clock, decimal precision, SSE executor, lifecycle logging
+├── config/        properties, InfluxDB client, clock, decimal precision, SSE executor, lifecycle logging,
+│                  ProductionSafeguards (what production mode refuses)
 ├── configdata/    startup loaders: AWS SSM Parameter Store (SsmConfigData) and Vault (VaultConfigData)
 ├── logging/       LogEvent catalogue, EventLog, LogFields, RequestIds
 ├── exchange/      SupportedExchange, MarketStreamManager (WebSocket lifecycle), stream health check
@@ -685,6 +707,7 @@ request as the code.
 | **One InfluxDB boundary** (`PriceRepository`). | Every Flux query is in one class, where interpolated values are checked and every call is timed. | Large for a single class, but it splits naturally by measurement if it grows. |
 | **Ordered lifecycles** (`SmartLifecycle` phases). | `CandleService` loads candles before the first tick and flushes after the last; `MarketStreamManager` connects in between. On shutdown `PriceStreamService` stops first and closes every stream, so clients reconnect to another instance while prices still flow, instead of waiting out the web server's graceful shutdown on a silent stream. Spring stops the Hazelcast member last, so the final flush still reaches the cluster. | Startup order lives in phase numbers, so it's documented on the beans. Every deploy reconnects every client once. |
 | **Fail-closed proxy.** Startup is refused if exchange REST calls wouldn't use SOCKS. | It's a security requirement: a misconfiguration must not leak traffic around the proxy. | An XChange upgrade that changes its proxy handling can't be merged until `SocksProxyTest` passes. |
+| **Production mode refuses, rather than warns about, unsafe settings.** | A warning in a log is easy to miss; a deploy that won't start is caught by the rollout before it serves traffic. | Staging needs `development` mode, or the production setup, to start. |
 | **`Optional` for an expected absence, exceptions for failures.** `PriceService.current` is empty while no exchange has a fresh price; `aggregate` throws `PriceUnavailableException` for REST, which maps it to 503. | "No price yet" is routine at startup and for quiet pairs. Streams and candles check it on every update, where throwing would capture a stack trace each time. | Two methods for one computation. |
 | **Injected `Clock`.** | Tests control time (staleness, period boundaries, throttling with `TestScheduler`). | Every time-dependent bean takes a constructor argument. |
 

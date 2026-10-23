@@ -37,7 +37,8 @@ See README "Running locally" for prerequisites and all `scripts/dev.sh` commands
 ```
 com.mds
 ├── cluster/      Hazelcast member config, Cluster (pair ownership, shared maps), cluster health
-├── config/       @ConfigurationProperties records (MdsProperties, InfluxProperties), beans, lifecycle logging
+├── config/       @ConfigurationProperties records (MdsProperties, InfluxProperties), beans, lifecycle logging,
+│                 ProductionSafeguards (what production mode refuses)
 ├── configdata/   startup loaders for AWS SSM Parameter Store and Vault (spring.factories)
 ├── logging/      LogEvent catalogue, EventLog, LogFields, RequestIds: logs for production support
 ├── exchange/     SupportedExchange, MarketStreamManager (WebSocket lifecycle), Bitstamp patch
@@ -83,6 +84,9 @@ com.mds
   then document them in `application.yml` and the README configuration table. Deployed values come
   from AWS SSM Parameter Store, secrets from Vault (README "Configuration and secrets"); both are
   read at startup by `configdata/` and fail closed.
+  - **Production mode** (`mds.mode=production`): a new setting that is unsafe in production (a
+    development default, something that opens access) gets a rule in
+    `ProductionSafeguards.violations`, naming the setting to change, never its value.
 - **Secrets:** never in plaintext in git, logs or error messages: not in `application.yml`, tests,
   fixtures or docs.
   - A new secret is a property that Vault supplies when deployed, with only a local development

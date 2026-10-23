@@ -55,7 +55,7 @@ class PriceStreamServiceTest {
                         Duration.ofMinutes(30), maxSubscribers, allowUnthrottled, List.of("*"), heartbeat),
                 new MdsProperties.DecimalSettings(8, RoundingMode.HALF_EVEN),
                 new MdsProperties.Ohlc(ZoneOffset.UTC, Duration.ofSeconds(10)),
-                new MdsProperties.SocksProxy("", 1080), TestClusters.standalone());
+                new MdsProperties.SocksProxy("", 1080), TestClusters.standalone(), MdsProperties.Mode.DEVELOPMENT);
         MarketStreamManager streams = mock(MarketStreamManager.class);
         when(streams.exchangesFor(BTC_USDT)).thenReturn(List.of("binance"));
         PriceService prices = new PriceService(streams, book, new PriceAggregator(), properties,
