@@ -232,6 +232,24 @@ class PriceStreamServiceTest {
         assertThat(service.shed(5)).isZero();
     }
 
+    @Test
+    void stoppingDisconnectsEveryClientBeforeTheExchangesStop() {
+        List<String> disconnected = new ArrayList<>();
+        service.start();
+        service.open(BTC_USDT, StreamRate.perSecond(1), PriceStreamService.SSE,
+                p -> { }, e -> { }, () -> disconnected.add("sse"));
+        service.open(BTC_USDT, StreamRate.perSecond(1), PriceStreamService.WEBSOCKET, p -> { }, e -> { },
+                () -> disconnected.add("websocket"));
+
+        service.stop();
+
+        assertThat(disconnected).containsExactlyInAnyOrder("sse", "websocket");
+        assertThat(service.subscribers()).isZero();
+        assertThat(service.isRunning()).isFalse();
+        // Spring stops higher phases first: streams, then exchanges, then candles
+        assertThat(service.getPhase()).isGreaterThan(MarketStreamManager.PHASE);
+    }
+
     private double gauge(String transport) {
         return registry.get("mds.stream.subscribers").tag("transport", transport).gauge().value();
     }

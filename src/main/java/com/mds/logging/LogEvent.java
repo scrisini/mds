@@ -47,6 +47,8 @@ public enum LogEvent {
             "Secrets loaded from HashiCorp Vault at startup"),
     CONFIG_LOAD_FAILED("MDS-1013", Level.ERROR,
             "Could not load configuration or secrets at startup; this instance refuses to start"),
+    STREAMS_CLOSED_FOR_SHUTDOWN("MDS-1014", Level.INFO,
+            "Shutting down: closed every real-time subscription so its client reconnects to another instance"),
 
     CANDLES_COMPLETED("MDS-2001", Level.INFO,
             "Candles for ended periods completed and written"),

@@ -17,6 +17,7 @@ import static java.util.stream.Collectors.toSet;
 import com.hazelcast.map.IMap;
 import com.mds.cluster.Cluster;
 import com.mds.config.MdsProperties;
+import com.mds.exchange.MarketStreamManager;
 import com.mds.logging.LogEvent;
 import com.mds.math.Decimal;
 import com.mds.model.Candle;
@@ -144,10 +145,10 @@ public class CandleService implements SmartLifecycle {
         return subscription != null;
     }
 
-    /** Starts before and stops after {@link com.mds.exchange.MarketStreamManager}. */
+    /** Starts before and stops after {@link MarketStreamManager}. */
     @Override
     public int getPhase() {
-        return DEFAULT_PHASE - 1;
+        return MarketStreamManager.PHASE - 1;
     }
 
     // ---- updates ----

@@ -14,6 +14,8 @@ import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Consumer;
 
 import com.mds.config.MdsProperties;
+import com.mds.exchange.MarketStreamManager;
+import com.mds.logging.LogEvent;
 import com.mds.model.AggregatedPrice;
 import com.mds.model.MarketPair;
 import com.mds.model.QuoteUpdate;
@@ -30,6 +32,7 @@ import io.reactivex.rxjava3.schedulers.Schedulers;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.context.SmartLifecycle;
 import org.springframework.http.MediaType;
 import org.springframework.stereotype.Service;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
@@ -45,13 +48,19 @@ import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
  *
  * <p>Metrics: {@code mds.stream.subscribers} gauge and {@code mds.stream.events} counter, both
  * tagged {@code transport} ({@code sse}/{@code websocket}); events also tagged {@code pair}.
+ *
+ * <p>On shutdown it stops first, before the exchange streams, and closes every subscription as
+ * {@linkplain #shed shedding} does. Otherwise the web server's graceful shutdown would wait for
+ * streams that never end, while their clients received no prices.
  */
 @Slf4j
 @Service
-public class PriceStreamService {
+public class PriceStreamService implements SmartLifecycle {
 
     public static final String SSE = "sse";
     public static final String WEBSOCKET = "websocket";
+    /** Stops before {@link MarketStreamManager#PHASE}, while prices still flow. */
+    public static final int PHASE = DEFAULT_PHASE;
 
     private final QuoteBook quoteBook;
     private final PriceService priceService;
@@ -64,6 +73,7 @@ public class PriceStreamService {
     // by opening order, so shedding can pick the newest
     private final ConcurrentSkipListMap<Long, Subscription> openByAge = new ConcurrentSkipListMap<>();
     private final Map<String, AtomicInteger> subscribersByTransport = new ConcurrentHashMap<>();
+    private volatile boolean running;
 
     @Autowired
     public PriceStreamService(QuoteBook quoteBook, PriceService priceService, MdsProperties properties,
@@ -88,6 +98,34 @@ public class PriceStreamService {
                     .tag("transport", transport)
                     .register(registry);
         }
+    }
+
+    // ---- lifecycle ----
+
+    @Override
+    public void start() {
+        running = true;
+    }
+
+    /**
+     * Closes every subscription, so each client reconnects through the load balancer to another
+     * instance at once. By now the load balancer no longer routes to this one.
+     */
+    @Override
+    public void stop() {
+        running = false;
+        int closed = shed(subscribers.get());
+        LogEvent.STREAMS_CLOSED_FOR_SHUTDOWN.at(log).with("closed", closed).log();
+    }
+
+    @Override
+    public boolean isRunning() {
+        return running;
+    }
+
+    @Override
+    public int getPhase() {
+        return PHASE;
     }
 
     /**

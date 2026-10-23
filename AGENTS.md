@@ -152,8 +152,10 @@ com.mds
   against a fake SOCKS5 server: a new exchange must pass it, and an XChange upgrade that breaks
   it must not be merged. Don't delete `src/main/resources/rescu.properties` (it makes exchange
   REST calls use SOCKS; startup fails closed without it).
-- `MarketStreamManager` and `CandleService` are `SmartLifecycle` beans; `CandleService` starts
-  first and stops last so it recovers before the first tick and flushes after the last.
+- `PriceStreamService`, `MarketStreamManager` and `CandleService` are `SmartLifecycle` beans
+  (phases in that order, highest first). `CandleService` starts first and stops last, so it
+  recovers before the first tick and flushes after the last; `PriceStreamService` stops first and
+  closes every stream, so clients reconnect elsewhere before the exchanges disconnect.
 
 ## Working agreements
 

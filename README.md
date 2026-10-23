@@ -533,7 +533,9 @@ stickiness is needed. Set `MDS_CLUSTER_REBALANCE_ENABLED=false` to keep clients 
   Hazelcast's phone-home, cloud auto-detection and multicast are off, so the only connections are
   to the configured members.
 - **Rolling deploys** work: instances leave and join one at a time, and their pairs move with their
-  candles. Stop instances gracefully (SIGTERM): the member hands its data over before it exits.
+  candles. Stop instances gracefully (SIGTERM): the instance first closes its SSE and WebSocket
+  streams, so clients reconnect elsewhere at once ([MDS-1014](docs/runbook.md#mds-1014)), and hands
+  its data over before it exits.
 - **`mds.decimal.*` and `mds.ohlc.zone` must match on every instance**, because the shared candles
   depend on them. An instance that disagrees with the running cluster refuses to start
   ([MDS-1009](docs/runbook.md#mds-1009)). To change them, stop every instance, then start them all
@@ -670,7 +672,7 @@ request as the code.
 | **Per-pair reload when the cluster lacks a pair's candles**, tracked by a marker that lives in the pair's partition. | The marker is lost together with the candles, so every way of losing them (cluster start, double failure, split) ends in a reload from InfluxDB instead of fresh candles overwriting stored ones. | One InfluxDB query per pair whenever ownership lands on a member without the state. |
 | **Rebalance subscribers by closing the newest** above the fair share, with a cool-down. | Long-lived connections don't move by themselves; shedding the newest disturbs established clients least, and the cool-down stops it shedding again before the reconnects are counted. | Clients must reconnect: SSE does by itself, WebSocket clients must handle close code 1013. |
 | **One InfluxDB boundary** (`PriceRepository`). | Every Flux query is in one class, where interpolated values are checked and every call is timed. | Large for a single class, but it splits naturally by measurement if it grows. |
-| **Ordered lifecycles** (`SmartLifecycle` phases). | `CandleService` loads candles before the first tick and flushes after the last; `MarketStreamManager` connects in between. Spring stops the Hazelcast member after both, so the final flush still reaches the cluster. | Startup order lives in phase numbers, so it's documented on the beans. |
+| **Ordered lifecycles** (`SmartLifecycle` phases). | `CandleService` loads candles before the first tick and flushes after the last; `MarketStreamManager` connects in between. On shutdown `PriceStreamService` stops first and closes every stream, so clients reconnect to another instance while prices still flow, instead of waiting out the web server's graceful shutdown on a silent stream. Spring stops the Hazelcast member last, so the final flush still reaches the cluster. | Startup order lives in phase numbers, so it's documented on the beans. Every deploy reconnects every client once. |
 | **Fail-closed proxy.** Startup is refused if exchange REST calls wouldn't use SOCKS. | It's a security requirement: a misconfiguration must not leak traffic around the proxy. | An XChange upgrade that changes its proxy handling can't be merged until `SocksProxyTest` passes. |
 | **`Optional` for an expected absence, exceptions for failures.** `PriceService.current` is empty while no exchange has a fresh price; `aggregate` throws `PriceUnavailableException` for REST, which maps it to 503. | "No price yet" is routine at startup and for quiet pairs. Streams and candles check it on every update, where throwing would capture a stack trace each time. | Two methods for one computation. |
 | **Injected `Clock`.** | Tests control time (staleness, period boundaries, throttling with `TestScheduler`). | Every time-dependent bean takes a constructor argument. |
