@@ -1,0 +1,430 @@
+{
+  "uid": "mds-candles",
+  "title": "Candles: day, week, month and year",
+  "description": "OHLC candles for every supported period (day, week, month, year) of one pair and source, from the InfluxDB ohlc measurement (README \"Dashboards\").",
+  "tags": [
+    "mds"
+  ],
+  "editable": true,
+  "schemaVersion": 41,
+  "version": 1,
+  "graphTooltip": 1,
+  "refresh": "30s",
+  "time": {
+    "from": "now-30d",
+    "to": "now"
+  },
+  "timepicker": {},
+  "timezone": "browser",
+  "templating": {
+    "list": [
+      {
+        "name": "pair",
+        "label": "Pair",
+        "description": "Pairs with candles (mds.pairs).",
+        "type": "query",
+        "datasource": {
+          "type": "influxdb",
+          "uid": "influxdb"
+        },
+        "query": "import \"influxdata/influxdb/schema\"\nschema.tagValues(bucket: \"prices\", tag: \"pair\", predicate: (r) => r._measurement == \"ohlc\", start: -11y)",
+        "definition": "import \"influxdata/influxdb/schema\"\nschema.tagValues(bucket: \"prices\", tag: \"pair\", predicate: (r) => r._measurement == \"ohlc\", start: -11y)",
+        "refresh": 1,
+        "sort": 1,
+        "multi": false,
+        "includeAll": false,
+        "current": {
+          "text": "BTC/USD",
+          "value": "BTC/USD"
+        },
+        "options": []
+      },
+      {
+        "name": "source",
+        "label": "Source",
+        "description": "index: the cross-exchange median of last prices; or one exchange's last price.",
+        "type": "query",
+        "datasource": {
+          "type": "influxdb",
+          "uid": "influxdb"
+        },
+        "query": "import \"influxdata/influxdb/schema\"\nschema.tagValues(bucket: \"prices\", tag: \"source\", predicate: (r) => r._measurement == \"ohlc\", start: -11y)",
+        "definition": "import \"influxdata/influxdb/schema\"\nschema.tagValues(bucket: \"prices\", tag: \"source\", predicate: (r) => r._measurement == \"ohlc\", start: -11y)",
+        "refresh": 1,
+        "sort": 1,
+        "multi": false,
+        "includeAll": false,
+        "current": {
+          "text": "index",
+          "value": "index"
+        },
+        "options": []
+      }
+    ]
+  },
+  "annotations": {
+    "list": []
+  },
+  "links": [
+    {
+      "title": "mds dashboards",
+      "type": "dashboards",
+      "tags": [
+        "mds"
+      ],
+      "asDropdown": true
+    }
+  ],
+  "panels": [
+    {
+      "id": 1,
+      "type": "table",
+      "title": "Current candle of each period",
+      "description": "The latest candle per period. complete = false: still in progress (upserted every mds.ohlc.flush-interval). updates = 0: carried forward, no price in this period yet.",
+      "datasource": {
+        "type": "influxdb",
+        "uid": "influxdb"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 0,
+        "w": 24,
+        "h": 6
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD",
+          "decimals": 2,
+          "custom": {
+            "align": "auto"
+          }
+        },
+        "overrides": [
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "_time"
+            },
+            "properties": [
+              {
+                "id": "displayName",
+                "value": "period start"
+              },
+              {
+                "id": "unit",
+                "value": "dateTimeAsIso"
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "updates"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "none"
+              },
+              {
+                "id": "decimals",
+                "value": 0
+              }
+            ]
+          },
+          {
+            "matcher": {
+              "id": "byName",
+              "options": "complete"
+            },
+            "properties": [
+              {
+                "id": "unit",
+                "value": "bool"
+              }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "showHeader": true,
+        "cellHeight": "sm"
+      },
+      "transformations": [
+        {
+          "id": "organize",
+          "options": {
+            "indexByName": {
+              "period": 0,
+              "_time": 1,
+              "open": 2,
+              "high": 3,
+              "low": 4,
+              "close": 5,
+              "updates": 6,
+              "complete": 7
+            }
+          }
+        }
+      ],
+      "targets": [
+        {
+          "datasource": {
+            "type": "influxdb",
+            "uid": "influxdb"
+          },
+          "refId": "A",
+          "query": "from(bucket: \"prices\")\n  |> range(start: -11y)\n  |> filter(fn: (r) => r._measurement == \"ohlc\" and r.pair == \"${pair}\" and r.source == \"${source}\")\n  |> filter(fn: (r) => r._field == \"open\" or r._field == \"high\" or r._field == \"low\" or r._field == \"close\" or r._field == \"updates\" or r._field == \"complete\")\n  |> last()\n  |> pivot(rowKey: [\"_time\", \"period\"], columnKey: [\"_field\"], valueColumn: \"_value\")\n  |> group()\n  |> map(fn: (r) => ({r with order: if r.period == \"day\" then 1 else if r.period == \"week\" then 2 else if r.period == \"month\" then 3 else 4}))\n  |> sort(columns: [\"order\"])\n  |> keep(columns: [\"period\", \"_time\", \"open\", \"high\", \"low\", \"close\", \"updates\", \"complete\"])"
+        }
+      ]
+    },
+    {
+      "id": 2,
+      "type": "candlestick",
+      "title": "Day candles",
+      "description": "One candle per day, timestamped at the period start (local midnight in mds.ohlc.zone). The current one is in progress; flat candles (open = high = low = close) were carried forward through a period without prices (README \"OHLC candles\").",
+      "datasource": {
+        "type": "influxdb",
+        "uid": "influxdb"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 6,
+        "w": 12,
+        "h": 10
+      },
+      "timeFrom": "30d",
+      "hideTimeOverride": false,
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD",
+          "decimals": 2,
+          "custom": {
+            "lineWidth": 1
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "mode": "candles",
+        "candleStyle": "candles",
+        "colorStrategy": "open-close",
+        "colors": {
+          "up": "green",
+          "down": "red"
+        },
+        "includeAllFields": false,
+        "fields": {
+          "open": "open",
+          "high": "high",
+          "low": "low",
+          "close": "close"
+        },
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": false
+        },
+        "tooltip": {
+          "mode": "single"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "influxdb",
+            "uid": "influxdb"
+          },
+          "refId": "A",
+          "query": "from(bucket: \"prices\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"ohlc\" and r.pair == \"${pair}\" and r.source == \"${source}\" and r.period == \"day\")\n  |> filter(fn: (r) => r._field == \"open\" or r._field == \"high\" or r._field == \"low\" or r._field == \"close\")\n  |> pivot(rowKey: [\"_time\"], columnKey: [\"_field\"], valueColumn: \"_value\")\n  |> keep(columns: [\"_time\", \"open\", \"high\", \"low\", \"close\"])"
+        }
+      ]
+    },
+    {
+      "id": 3,
+      "type": "candlestick",
+      "title": "Week candles",
+      "description": "One candle per week, timestamped at the period start (local midnight in mds.ohlc.zone). The current one is in progress; flat candles (open = high = low = close) were carried forward through a period without prices (README \"OHLC candles\").",
+      "datasource": {
+        "type": "influxdb",
+        "uid": "influxdb"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 6,
+        "w": 12,
+        "h": 10
+      },
+      "timeFrom": "26w",
+      "hideTimeOverride": false,
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD",
+          "decimals": 2,
+          "custom": {
+            "lineWidth": 1
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "mode": "candles",
+        "candleStyle": "candles",
+        "colorStrategy": "open-close",
+        "colors": {
+          "up": "green",
+          "down": "red"
+        },
+        "includeAllFields": false,
+        "fields": {
+          "open": "open",
+          "high": "high",
+          "low": "low",
+          "close": "close"
+        },
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": false
+        },
+        "tooltip": {
+          "mode": "single"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "influxdb",
+            "uid": "influxdb"
+          },
+          "refId": "A",
+          "query": "from(bucket: \"prices\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"ohlc\" and r.pair == \"${pair}\" and r.source == \"${source}\" and r.period == \"week\")\n  |> filter(fn: (r) => r._field == \"open\" or r._field == \"high\" or r._field == \"low\" or r._field == \"close\")\n  |> pivot(rowKey: [\"_time\"], columnKey: [\"_field\"], valueColumn: \"_value\")\n  |> keep(columns: [\"_time\", \"open\", \"high\", \"low\", \"close\"])"
+        }
+      ]
+    },
+    {
+      "id": 4,
+      "type": "candlestick",
+      "title": "Month candles",
+      "description": "One candle per month, timestamped at the period start (local midnight in mds.ohlc.zone). The current one is in progress; flat candles (open = high = low = close) were carried forward through a period without prices (README \"OHLC candles\").",
+      "datasource": {
+        "type": "influxdb",
+        "uid": "influxdb"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 16,
+        "w": 12,
+        "h": 10
+      },
+      "timeFrom": "24M",
+      "hideTimeOverride": false,
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD",
+          "decimals": 2,
+          "custom": {
+            "lineWidth": 1
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "mode": "candles",
+        "candleStyle": "candles",
+        "colorStrategy": "open-close",
+        "colors": {
+          "up": "green",
+          "down": "red"
+        },
+        "includeAllFields": false,
+        "fields": {
+          "open": "open",
+          "high": "high",
+          "low": "low",
+          "close": "close"
+        },
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": false
+        },
+        "tooltip": {
+          "mode": "single"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "influxdb",
+            "uid": "influxdb"
+          },
+          "refId": "A",
+          "query": "from(bucket: \"prices\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"ohlc\" and r.pair == \"${pair}\" and r.source == \"${source}\" and r.period == \"month\")\n  |> filter(fn: (r) => r._field == \"open\" or r._field == \"high\" or r._field == \"low\" or r._field == \"close\")\n  |> pivot(rowKey: [\"_time\"], columnKey: [\"_field\"], valueColumn: \"_value\")\n  |> keep(columns: [\"_time\", \"open\", \"high\", \"low\", \"close\"])"
+        }
+      ]
+    },
+    {
+      "id": 5,
+      "type": "candlestick",
+      "title": "Year candles",
+      "description": "One candle per year, timestamped at the period start (local midnight in mds.ohlc.zone). The current one is in progress; flat candles (open = high = low = close) were carried forward through a period without prices (README \"OHLC candles\").",
+      "datasource": {
+        "type": "influxdb",
+        "uid": "influxdb"
+      },
+      "gridPos": {
+        "x": 12,
+        "y": 16,
+        "w": 12,
+        "h": 10
+      },
+      "timeFrom": "10y",
+      "hideTimeOverride": false,
+      "fieldConfig": {
+        "defaults": {
+          "unit": "currencyUSD",
+          "decimals": 2,
+          "custom": {
+            "lineWidth": 1
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "mode": "candles",
+        "candleStyle": "candles",
+        "colorStrategy": "open-close",
+        "colors": {
+          "up": "green",
+          "down": "red"
+        },
+        "includeAllFields": false,
+        "fields": {
+          "open": "open",
+          "high": "high",
+          "low": "low",
+          "close": "close"
+        },
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom",
+          "showLegend": false
+        },
+        "tooltip": {
+          "mode": "single"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "influxdb",
+            "uid": "influxdb"
+          },
+          "refId": "A",
+          "query": "from(bucket: \"prices\")\n  |> range(start: v.timeRangeStart, stop: v.timeRangeStop)\n  |> filter(fn: (r) => r._measurement == \"ohlc\" and r.pair == \"${pair}\" and r.source == \"${source}\" and r.period == \"year\")\n  |> filter(fn: (r) => r._field == \"open\" or r._field == \"high\" or r._field == \"low\" or r._field == \"close\")\n  |> pivot(rowKey: [\"_time\"], columnKey: [\"_field\"], valueColumn: \"_value\")\n  |> keep(columns: [\"_time\", \"open\", \"high\", \"low\", \"close\"])"
+        }
+      ]
+    }
+  ]
+}
