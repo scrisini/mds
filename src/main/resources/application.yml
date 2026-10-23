@@ -12,9 +12,19 @@ spring:
   threads:
     virtual:
       enabled: true
+  lifecycle:
+    # Each shutdown phase (web server, then exchange streams, then candles) waits at most this long. The
+    # container's stop timeout must cover it; see docs/deployment.md "Timeouts".
+    timeout-per-shutdown-phase: 30s
 
 server:
   port: 8080
+  # On SIGTERM: stop accepting, let in-flight requests finish, then stop (the default, made explicit).
+  shutdown: graceful
+  tomcat:
+    # Must outlast the load balancer's idle timeout (ALB: 120s in docs/deployment.md), or the load
+    # balancer reuses a connection Tomcat is closing and the client gets a 502. Tomcat's default is 60s.
+    keep-alive-timeout: ${MDS_SERVER_KEEP_ALIVE_TIMEOUT:130s}
 
 mds:
   exchanges: ${MDS_EXCHANGES:binance,kraken,bitstamp,kucoin,bitfinex}
@@ -101,6 +111,10 @@ management:
   endpoint:
     health:
       show-details: always
+      # /actuator/health/liveness and /readiness everywhere, not only on Kubernetes: load balancer
+      # health checks use readiness (docs/deployment.md)
+      probes:
+        enabled: true
   metrics:
     tags:
       application: mds

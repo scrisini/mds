@@ -1,0 +1,8 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: mds
+  labels:
+    # The AWS Load Balancer Controller adds a readiness gate to pods here: a new pod counts as ready
+    # only once the ALB sees it healthy, so a rolling update never runs ahead of the load balancer.
+    elbv2.k8s.aws/pod-readiness-gate-inject: enabled

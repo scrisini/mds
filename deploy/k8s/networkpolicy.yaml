@@ -1,0 +1,39 @@
+# Hazelcast traffic is neither encrypted nor authenticated: only mds pods may reach port 5701.
+# HTTP (8080) stays open to the ALB. Needs a CNI that enforces NetworkPolicy (on EKS: the VPC CNI
+# with network policy enabled, or Calico).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: mds
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: mds
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: mds
+      ports:
+        - port: 5701
+    - ports:
+        - port: 8080
+---
+# InfluxDB takes connections from mds only.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: influxdb
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: influxdb
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: mds
+      ports:
+        - port: 8086

@@ -156,6 +156,10 @@ com.mds
   (phases in that order, highest first). `CandleService` starts first and stops last, so it
   recovers before the first tick and flushes after the last; `PriceStreamService` stops first and
   closes every stream, so clients reconnect elsewhere before the exchanges disconnect.
+- **Deployment** (`docs/deployment.md`, files in `deploy/`): ECS or EKS behind an ALB. Its timeouts
+  must agree with `application.yml` (ALB idle 120 s < `server.tomcat.keep-alive-timeout` 130 s);
+  change both together. `deploy/` holds examples with `CHANGE` placeholders, never real account
+  ids, hosts or secrets.
 
 ## Working agreements
 

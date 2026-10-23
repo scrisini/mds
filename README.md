@@ -4,7 +4,8 @@ Spring Boot service that streams real-time ticker data over WebSocket from sever
 [XChange](https://github.com/knowm/XChange) (`xchange-stream-*`), aggregates it per currency pair,
 serves it over REST, and archives snapshots in InfluxDB 2.x for later retrieval. Several
 instances form an embedded Hazelcast cluster, so losing one loses no candles (see
-[Running several instances](#running-several-instances)).
+[Running several instances](#running-several-instances)). To run it in production on AWS (ECS or
+EKS behind an ALB), see [`docs/deployment.md`](docs/deployment.md).
 
 ```
 exchange WebSockets ──► MarketStreamManager ──► QuoteBook (latest quote per exchange/pair)
@@ -251,6 +252,7 @@ Deployed environments take their settings from AWS SSM Parameter Store and their
 | `mds.cluster.kubernetes-service-dns` | `MDS_CLUSTER_KUBERNETES_SERVICE_DNS` | blank; a headless Service to find the pods |
 | `mds.cluster.rebalance.enabled` / `.interval` | `MDS_CLUSTER_REBALANCE_ENABLED` | `true` / `10s` |
 | `mds.cluster.rebalance.tolerance` / `.max-per-round` | | `0.2` (20% over the fair share) / `20` |
+| `server.tomcat.keep-alive-timeout` | `MDS_SERVER_KEEP_ALIVE_TIMEOUT` | `130s`; must be longer than the load balancer's idle timeout ([Timeouts](docs/deployment.md#timeouts)) |
 | `logging.structured.format.console` | `MDS_LOG_FORMAT` | blank = readable text; `ecs` for ECS JSON in production |
 | `logging.structured.ecs.service.environment` | `MDS_ENVIRONMENT` | `local` |
 
@@ -522,8 +524,9 @@ plus `tolerance` closes its newest subscriptions, down to the fair share and at 
 - **WebSocket** clients get close code **1013** (try again later) and must reconnect and subscribe
   again.
 
-Use **least-connections** balancing, so reconnects go to the quieter instances; no session
-stickiness is needed. Set `MDS_CLUSTER_REBALANCE_ENABLED=false` to keep clients where they are.
+Use **least-connections** balancing (on an AWS ALB, which has no such mode, use least outstanding
+requests), so reconnects go to the quieter instances; no session stickiness is needed. Set
+`MDS_CLUSTER_REBALANCE_ENABLED=false` to keep clients where they are.
 
 **Deploying**
 
@@ -542,7 +545,8 @@ stickiness is needed. Set `MDS_CLUSTER_REBALANCE_ENABLED=false` to keep clients 
 - **Rolling deploys** work: instances leave and join one at a time, and their pairs move with their
   candles. Stop instances gracefully (SIGTERM): the instance first closes its SSE and WebSocket
   streams, so clients reconnect elsewhere at once ([MDS-1014](docs/runbook.md#mds-1014)), and hands
-  its data over before it exits.
+  its data over before it exits. Load balancer settings, timeouts and ready-made ECS and Kubernetes
+  files: [`docs/deployment.md`](docs/deployment.md).
 - **`mds.decimal.*` and `mds.ohlc.zone` must match on every instance**, because the shared candles
   depend on them. An instance that disagrees with the running cluster refuses to start
   ([MDS-1009](docs/runbook.md#mds-1009)). To change them, stop every instance, then start them all

@@ -1,0 +1,21 @@
+# Only what an instance needs to find its configuration and its peers. Everything else comes from
+# SSM Parameter Store (settings) and Vault (secrets such as mds.influx.token): README
+# "Configuration and secrets".
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: mds-env
+data:
+  MDS_ENVIRONMENT: prod
+  MDS_LOG_FORMAT: ecs
+  # The headless Service in services.yaml: <service>.<namespace>.svc.cluster.local
+  MDS_CLUSTER_KUBERNETES_SERVICE_DNS: mds-hz.mds.svc.cluster.local
+  MDS_INFLUX_URL: http://influxdb:8086
+  MDS_SSM_PATH: /mds/prod/                         # CHANGE
+  MDS_SSM_REGION: ap-southeast-2                   # CHANGE
+  MDS_VAULT_ADDRESS: https://vault.internal:8200   # CHANGE
+  MDS_VAULT_AUTH: kubernetes
+  MDS_VAULT_KUBERNETES_ROLE: mds
+  MDS_VAULT_PATH: mds/prod
+  # The image's launcher prints a native-memory report to stdout at exit; keep stdout JSON only
+  BPL_JAVA_NMT_ENABLED: "false"

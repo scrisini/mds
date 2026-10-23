@@ -1,0 +1,81 @@
+# One InfluxDB 2.7 (open source has no clustering) on an EBS-backed volume in one zone. Its pod is
+# rescheduled if its node fails, but only in that zone; take EBS snapshots for backups. For a
+# standby in another zone, use Amazon Timestream for InfluxDB (Multi-AZ) and point MDS_INFLUX_URL
+# at it instead: docs/deployment.md "InfluxDB".
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: influxdb
+spec:
+  serviceName: influxdb
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: influxdb
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: influxdb
+    spec:
+      terminationGracePeriodSeconds: 60
+      containers:
+        - name: influxdb
+          image: influxdb:2.7
+          ports:
+            - name: http
+              containerPort: 8086
+          env:
+            # First start only: creates the org, the bucket (kept forever) and the admin token
+            - { name: DOCKER_INFLUXDB_INIT_MODE, value: setup }
+            - { name: DOCKER_INFLUXDB_INIT_ORG, value: mds }
+            - { name: DOCKER_INFLUXDB_INIT_BUCKET, value: prices }
+            - { name: DOCKER_INFLUXDB_INIT_RETENTION, value: 0s }
+            - name: DOCKER_INFLUXDB_INIT_USERNAME
+              valueFrom: { secretKeyRef: { name: influxdb-auth, key: username } }
+            - name: DOCKER_INFLUXDB_INIT_PASSWORD
+              valueFrom: { secretKeyRef: { name: influxdb-auth, key: password } }
+            - name: DOCKER_INFLUXDB_INIT_ADMIN_TOKEN
+              valueFrom: { secretKeyRef: { name: influxdb-auth, key: token } }
+          resources:
+            requests:
+              cpu: 500m
+              memory: 2Gi
+            limits:
+              memory: 2Gi
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 10
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/influxdb2
+            - name: config
+              mountPath: /etc/influxdb2
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 100Gi
+    - metadata:
+        name: config
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 1Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: influxdb
+spec:
+  selector:
+    app.kubernetes.io/name: influxdb
+  ports:
+    - name: http
+      port: 8086
+      targetPort: http
