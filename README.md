@@ -430,6 +430,137 @@ com.mds
 └── web/           REST and SSE controllers, PriceWebSocketHandler, ApiExceptionHandler, RequestIdFilter
 ```
 
+## Design
+
+This section records why the code is shaped the way it is. The general rules behind it (object
+granularity, single-purpose methods, code the JIT and GC handle well) are in
+[`docs/design-principles.md`](docs/design-principles.md). Change a decision here in the same pull
+request as the code.
+
+### Decisions
+
+| Decision | Why | Trade-off |
+|---|---|---|
+| **Latest state, not an event log.** `QuoteBook` keeps the latest quote per exchange and pair; its update stream only says *which pair changed*, and consumers read the current state. | A slow consumer skips to the latest state instead of working through a backlog. Memory is bounded by exchanges × pairs, whatever the tick rate. | Intermediate ticks aren't replayable. Candles fold every tick into high and low as it arrives, so they don't need them. |
+| **Aggregate on read.** `PriceService` aggregates the fresh quotes when asked: per REST request, per stream event, per candle update. | Staleness (`mds.stale-after`) is always judged against *now*, so an exchange that went quiet drops out without a timer. | The work repeats once per real-time subscriber (see [Hotspots](#hotspots)). |
+| **Fixed-point `Decimal`** (a `long` count of 10^-scale units, with one scale and rounding per JVM). | Exact arithmetic for prices, without allocating `BigDecimal`s or accumulating `double` rounding errors; comparisons are a `long` compare. | The range is ±92 billion at scale 8. Precision is JVM-global, set once at startup. |
+| **Immutable records, with methods that return new values** (`PriceQuote.mergedWith`, `Candle.with`). | Quotes arrive on several exchange I/O threads at once. Immutable values can be shared without locks, and `ConcurrentHashMap.merge`/`compute` replaces one per key atomically. | One short-lived object per update, which young-generation GC handles cheaply. |
+| **Latest-value throttling per subscriber** (`throttleLatest`, `BackpressureStrategy.LATEST`, `observeOn` with a buffer of 1, a virtual thread per send). | Each client gets its own rate. A slow one is sent the newest state when it catches up and never holds a queue; WebSocket sends are capped at 512 KB, after which the client is disconnected. | A fast-changing pair is sampled, not replayed, for throttled clients. |
+| **One subscription path for every transport** (`PriceStreamService.open` takes a `PriceListener` callback). | Rates, the subscriber limit, metrics and slow-client handling live in one place; SSE and WebSocket only format and send. | Transports can't change throttling behaviour independently. |
+| **One InfluxDB boundary** (`PriceRepository`). | Every Flux query is in one class, where interpolated values are checked and every call is timed. | Large for a single class, but it splits naturally by measurement if it grows. |
+| **Ordered lifecycles** (`SmartLifecycle` phases). | `CandleService` reloads candles before the first tick and flushes after the last; `MarketStreamManager` connects in between. | Startup order lives in phase numbers, so it's documented on the beans. |
+| **Fail-closed proxy.** Startup is refused if exchange REST calls wouldn't use SOCKS. | It's a security requirement: a misconfiguration must not leak traffic around the proxy. | An XChange upgrade that changes its proxy handling can't be merged until `SocksProxyTest` passes. |
+| **`Optional` for an expected absence, exceptions for failures.** `PriceService.current` is empty while no exchange has a fresh price; `aggregate` throws `PriceUnavailableException` for REST, which maps it to 503. | "No price yet" is routine at startup and for quiet pairs. Streams and candles check it on every update, where throwing would capture a stack trace each time. | Two methods for one computation. |
+| **Injected `Clock`.** | Tests control time (staleness, period boundaries, throttling with `TestScheduler`). | Every time-dependent bean takes a constructor argument. |
+
+### Patterns
+
+| Pattern | Where | Why here |
+|---|---|---|
+| Value object | `MarketPair`, `Decimal`, `Candle`, `StreamRate` | Validation and behaviour sit with the data; a `MarketPair` is always safe to put in a Flux query. |
+| Observer (publish/subscribe) | `QuoteBook.updates()`, an RxJava serialized subject | Candles and streams react to changes without `QuoteBook` knowing about them. |
+| Facade | `PriceService` over `QuoteBook`, `MarketStreamManager` and `PriceAggregator` | Controllers, streams and candles ask one question ("the aggregate for this pair") without assembling it. |
+| Functional core, imperative shell | `PriceAggregator` (pure) inside `PriceService` (clock and state) | The statistics are tested with plain lists, without mocks or time. |
+| Repository | `PriceRepository` | One place for storage access, query validation and storage metrics. |
+| Anti-corruption layer | `QuoteBook` (XChange `BigDecimal` → `Decimal`), `PatchedBitstampStreamingExchange` | Library types and bugs stop at the boundary. The patch has a guard test that fails once upstream is fixed. |
+| Enum with behaviour | `CandlePeriod` (`start`/`end` per period), `SupportedExchange`, `LogEvent` | Closed sets with a `switch` instead of a class hierarchy; call sites stay monomorphic. |
+| Catalogue and fluent builder | `LogEvent.X.at(log).with(...).log()` | Every operational line has a stable code, level and SOP link, and call sites read as one sentence. |
+| Decorator | `ConcurrentWebSocketSessionDecorator` | Thread-safe, bounded sends without changing the handler. |
+| Template method hook | `ApiExceptionHandler.createResponseEntity` | Adds the `requestId` to Spring's own problem responses. |
+| Scoped resource | `RequestIds.bind` returns a `Scope` for try-with-resources | The request id can't leak into the next task on a pooled thread. |
+| Retry with fixed delay | `retryWhen`/`repeatWhen` in `MarketStreamManager` | Dropped streams and failed connections come back without manual action. |
+
+**Deliberately not used:**
+- Interface-plus-`Impl` pairs for single implementations.
+- Separate DTOs mapped 1:1 from the records. The API serialises the model records, which is fine
+  at this size, but a model change is an API change, so review it as one.
+- A generic event bus, or abstract base controllers.
+- Wrapper types for exchange ids: they're plain strings, validated at the boundaries
+  (`EXCHANGE_ID`, `SupportedExchange`).
+
+### Granularity and method size
+
+A type exists here because it holds an invariant (`MarketPair`, `Decimal`), owns a lifecycle or
+resource (`MarketStreamManager`, `CandleService`), hides a boundary (`PriceRepository`,
+`QuoteBook`), or names a domain concept (`Candle`, `AggregatedPrice`). A noun alone doesn't earn
+a type. Compound map keys are private nested records (`QuoteBook.Key`, `CandleService.Key`), not
+concatenated strings or nested maps.
+
+Methods have one purpose. A method that coordinates calls its steps in order and does nothing
+else, for example:
+
+```java
+synchronized void flush() {            // CandleService
+    closeEndedPeriods(clock.instant());
+    write(drainCompleted());
+}
+```
+
+These follow the same shape:
+- `PriceStreamService.open`: `reserveSlot`, `eventsCounter`, then a named `Subscription`.
+- `MarketStreamManager.start`: `start(exchange, pairs)`, then `create`, `attach`, `products`.
+- `CandleService.recover`: `resume` per stored candle.
+
+The split stops where a name would only restate a line of code.
+
+### Performance: JIT and GC
+
+The hot paths, in order of volume:
+1. **Every tick:** `QuoteBook.onTicker` and `CandleService.onUpdate`. That's tens per second
+   across exchanges.
+2. **Every change × every subscriber:** `PriceService.current`, `PriceAggregator` and JSON
+   serialisation.
+3. **Every flush or snapshot:** `CandleService.flush` and `PriceRepository` writes.
+
+What's done for the JIT and GC, and why:
+- **Primitive arithmetic.** `Decimal` multiplies and divides in 128 bits on `long`s, so prices
+  never allocate a `BigDecimal` after they arrive from XChange.
+- **Small, single-purpose, `final`/`private`/`static` methods.** HotSpot always inlines methods
+  under 35 bytes of bytecode, and hot ones up to 325 bytes. Inlining is what enables escape
+  analysis, which can remove short-lived allocations altogether. Records, enums and final
+  classes keep call sites monomorphic.
+- **Loops in the per-subscriber path.** `PriceAggregator` sorts one array and scans it, with no
+  streams, comparators or `Optional` chains per call. `MarketStreamManager.exchangesFor` reads
+  an index built when connections change, instead of filtering and sorting on every
+  aggregation.
+- **No exceptions for routine outcomes** on per-event paths: `PriceService.current` returns
+  `Optional`.
+- **Constants built once.** Each `LogEvent` builds its `[CODE] summary` message and runbook link
+  in its constructor; meters on per-event paths are registered once and kept.
+- **Bounded memory.** Latest-value state, `LATEST` backpressure, a 512 KB WebSocket send buffer
+  per client, and the completed-candle queue drained on every flush.
+
+Not done, deliberately:
+- Per-tick `QuoteBook.Key` and `MarketPair.toString()` allocations. At tens per second they cost
+  nanoseconds and die young; caching them would add state for no measurable gain.
+- Tuning the default G1 collector and heap ergonomics. Set the heap limit in deployment, and
+  tune only with a recording that shows a reason.
+
+#### Hotspots
+
+The next candidates, each needing a decision before changing:
+- **Aggregation and serialisation run once per subscriber per change.** With N subscribers on a
+  pair, a change costs N aggregations and N JSON encodings. Sharing one aggregate per pair per
+  change would make this constant. However, the aggregate's `timestamp` would then mean "time of
+  the change", not "time sent", and the staleness check would run per change rather than per
+  send.
+- **Every subscriber's filter sees every pair's updates.** A subject per pair would route
+  updates directly.
+
+To measure, start InfluxDB (`scripts/dev.sh infra`) and record a run with JFR, skipping the
+first minute so startup doesn't dominate. Put load on it while it records (real-time
+subscribers, for the per-subscriber path):
+
+```bash
+./gradlew bootJar
+java -XX:StartFlightRecording=delay=60s,duration=5m,filename=build/mds.jfr \
+    -jar "$(ls build/libs/mds-*.jar | grep -v plain)" --mds.instance=agent
+jfr view allocation-by-class build/mds.jfr   # jfr is in the JDK's bin directory
+jfr view hot-methods build/mds.jfr           # or open the file in JDK Mission Control
+```
+
+Commits typed `perf` carry before-and-after numbers in the body.
+
 ## Contributing
 
 ### Commit messages (semantic-release)
@@ -581,3 +712,277 @@ squash-only on `main` with linear history, merge-commit-only on `develop`, no fo
 deletion, and the `commitlint` check required on both. Run it without arguments to see what it
 would change, then with `--apply` (add `--create-develop` to create `develop` from `main`).
 
+For the terms, the reasoning and the commands, see [Git guide](#git-guide).
+
+
+## Git guide
+
+How we use Git day to day, written for newcomers and as a refresher for everyone else. The rules
+are in [Branching and merging](#branching-and-merging); this section explains them and lists the
+commands. Commands need Git 2.23 or later (for `git switch` and `git restore`). Pull requests use
+`gh`, GitHub's official CLI, because Git itself has no pull requests.
+
+### Terms
+
+| Term | Meaning |
+|---|---|
+| **Repository (repo)** | The project and its full history. Your clone is a complete copy. |
+| **Remote, `origin`** | The copy on GitHub. `origin/develop` is your local record of GitHub's `develop`, as of your last `git fetch`. |
+| **Commit** | A snapshot of the files plus a message, identified by a hash such as `57134e6`. Commits never change; "changing" one creates a new one with a new hash. |
+| **Branch** | A movable label pointing at a commit. Committing on a branch moves its label forward. |
+| **`HEAD`** | The commit you have checked out: usually the tip of the current branch. |
+| **Working tree, index (staging area)** | Your files on disk, and the set of changes you've marked with `git add` for the next commit. |
+| **Fetch vs pull** | `fetch` downloads new commits and updates `origin/*` without touching your files. `pull` is `fetch` followed by a merge (or rebase) into your current branch. |
+| **Merge** | Joins two lines of history. If one side is just ahead of the other, Git simply moves the label (**fast-forward**). Otherwise it creates a **merge commit** with two parents. |
+| **Squash merge** | Takes all of a branch's changes and makes **one new commit** from them on the target branch. The branch's own commits aren't part of the target's history. |
+| **Rebase** | Replays your commits on top of another commit, creating **new** commits (new hashes) with the same changes. |
+| **Conflict** | Both sides changed the same lines (or one deleted a file the other changed). Git stops and asks you to choose. |
+| **Back-merge** | Merging `main` back into `develop` after a release, so `develop`'s history contains the release commit (see below). |
+| **Tag** | A fixed label on one commit, such as `v1.0.0`. Unlike a branch, it never moves. |
+| **Pull request (PR)** | A GitHub request to merge one branch into another, with review and checks. |
+| **Force push** | Overwriting a remote branch with history that doesn't contain what's there. Never on `main` or `develop`; on your own branch, only with `--force-with-lease`. |
+
+### Merge, rebase and squash
+
+All three combine work; they differ in what history they leave. Start from this, where you
+branched `feat/x` from `develop` at `B`, and others merged `C` and `D` since:
+
+```
+develop:  A---B---C---D
+               \
+feat/x:         E---F
+```
+
+**Merge** (`git merge origin/develop` on `feat/x`, or a merge-commit PR) keeps every commit and
+adds `M`, which has two parents. Nothing is rewritten, so it's safe on branches others use.
+
+```
+develop:  A---B---C---D
+               \       \
+feat/x:         E---F---M
+```
+
+**Rebase** (`git rebase origin/develop` on `feat/x`) replays `E` and `F` on top of `D` as new
+commits `E'` and `F'`. The result is a straight line, as if you'd started from `D`.
+
+```
+develop:  A---B---C---D
+                       \
+feat/x:                 E'--F'
+```
+
+**Squash** (a squash-merge PR) turns the branch's changes into one new commit `S` on the target.
+
+```
+main:     R---S          S = E + F as one commit; E and F stay only on feat/x
+```
+
+**When to use which:**
+- **Merge to integrate.** Use it to bring `develop` into your branch, and for every PR into
+  `develop`. It never rewrites shared history, so nobody else's branch breaks.
+- **Rebase only your own, unshared commits:** commits you haven't pushed, or a branch nobody else
+  has checked out. It gives a cleaner history and lets you tidy commits before review
+  (`git rebase -i`). The golden rule is to **never rebase commits other people have**, because
+  their copies still have the old hashes and their next pull duplicates or conflicts with every
+  rebased commit. After rebasing a pushed branch, push with `--force-with-lease`, which refuses
+  if someone else pushed in the meantime.
+- **Squash for releases only** (`develop` → `main`), so semantic-release reads one commit per
+  release. Never squash into `develop`. The squashed commit has a new hash, so every branch cut
+  from the original commits would conflict with `develop` afterwards.
+
+### Back-merging
+
+A squash merge creates a commit on `main` that `develop` doesn't have:
+
+```
+main:     R-----------S            S = the release squash
+           \
+develop:    B---C---D---(new work)
+```
+
+Git compares branches by history, not by content. Without a back-merge, the next `develop` →
+`main` PR offers `B`, `C` and `D` again and conflicts on every line they touched. The back-merge
+is a merge commit `K` that makes `S` part of `develop`'s history:
+
+```
+main:     R-----------S
+           \           \
+develop:    B---C---D---K---(new work)
+```
+
+From then on, the next release PR contains only new work.
+
+- **Back-merge straight after each release, before anything else merges into `develop`.** Then
+  both sides have the same content and the merge is clean.
+- **If work landed on `develop` first,** the back-merge conflicts wherever that work changed
+  files the release also touched. If `main` holds nothing beyond the release (no hotfix), keep
+  `develop`'s side for every conflict. Check this first: `git diff <release-point> origin/main`
+  must print nothing, where `<release-point>` is the `develop` commit the release PR squashed
+  (`gh pr view <N> --json headRefOid`). With a hotfix on `main`, resolve each conflict by hand.
+
+### Tags vs branches
+
+| | Branch | Tag |
+|---|---|---|
+| Moves? | Yes, with every commit | Never |
+| Used for | Ongoing work (`develop`, `feat/x`) | Marking a release (`v1.2.0`) |
+| Created by | You | The `release` workflow (semantic-release), on `main` |
+
+- **Don't create or move release tags by hand.** semantic-release works out the next version
+  from the latest `vX.Y.Z` tag, and GitHub releases are attached to tags.
+- **To look at a release,** check out its tag: you get a *detached HEAD*, meaning no branch is
+  checked out. Commits made there belong to no branch, so create a branch first if you want to
+  change anything.
+- **A hotfix for an old release** starts from its tag: `git switch -c fix/x v1.2.0`.
+
+### Working in parallel without conflicts
+
+- **Keep branches short-lived and small.** One logical change, merged within days. Long-lived
+  branches drift and conflict.
+- **Sync with `develop` often,** at least daily and always before opening a PR:
+  `git fetch` then `git merge origin/develop`. Resolve conflicts on your branch, never in
+  `develop`.
+- **Start every branch from a fresh `develop`.** Run `git pull` on `develop` first.
+- **Never commit to `main` or `develop` directly;** the rulesets enforce this.
+- **Don't mix in unrelated changes:** reformatting, reordering imports, or files you happened to
+  open. They conflict with everyone else's work and hide the real change.
+- **Talk before touching hot files.** When two people must change the same class, agree who goes
+  first, or land a small shared refactor before both branches.
+- **One release at a time.** Whoever squashes `develop` into `main` back-merges immediately,
+  before merging anything else into `develop`.
+- **Turn on `rerere`** (below). Git then remembers how you resolved a conflict and reapplies it
+  if the same conflict comes back.
+
+### Command cheat sheet
+
+**Once per machine and per clone**
+
+```bash
+git config --global user.name "Your Name"
+git config --global user.email you@example.com
+git config --global pull.ff only        # pull never creates surprise merge commits
+git config --global fetch.prune true    # forget remote branches deleted on GitHub
+git config --global rerere.enabled true # reuse recorded conflict resolutions
+scripts/dev.sh hooks                    # in each clone: the commit-msg hook
+```
+
+**Start a change**
+
+```bash
+git switch develop
+git pull                                # fast-forward to GitHub's develop
+git switch -c feat/short-description    # or fix/…, docs/…, refactor/…
+```
+
+**Commit**
+
+```bash
+git status                              # what changed, what's staged
+git diff                                # unstaged changes; --staged for staged ones
+git add src/main/java/Foo.java          # stage explicit paths (or: git add -p to pick hunks)
+git commit                              # the hook checks the message
+git commit --amend                      # fix the last commit, only if not pushed yet
+```
+
+**Stay up to date** (daily, and before a PR)
+
+```bash
+git fetch
+git merge origin/develop                # on your branch
+# on conflict: edit the files, then
+git add <resolved files>
+git commit                              # completes the merge
+git merge --abort                       # or give up and go back
+```
+
+**Push and open a pull request**
+
+```bash
+git push -u origin feat/short-description   # first push; later just: git push
+gh pr create --base develop --fill          # title and body from your commits; edit as needed
+gh pr checks --watch                        # wait for commitlint
+gh pr merge --merge --delete-branch         # into develop: always a merge commit
+```
+
+**After your PR is merged**
+
+```bash
+git switch develop
+git pull
+git branch -d feat/short-description    # -d refuses if the branch isn't merged
+```
+
+**Release** (`develop` → `main`, then back-merge)
+
+```bash
+# the commits new since the last release; $last is the develop commit that release squashed
+git fetch
+last=$(gh pr list --base main --head develop --state merged --limit 1 \
+    --json headRefOid -q '.[0].headRefOid')
+git log --no-merges --reverse --format='* %B' "$last"..origin/develop ^origin/main \
+    > release-body.txt
+# edit release-body.txt: one Co-Authored-By per person at the end, breaking-change footers last
+gh pr create --base main --head develop --title "feat(api): <highest bump, summary>" --body ""
+gh pr merge <N> --squash --subject "<the title>" --body-file release-body.txt
+# straight after: back-merge
+git fetch
+git switch -c chore/back-merge-main origin/develop
+git merge origin/main -m "chore: back-merge main into develop"
+git push -u origin chore/back-merge-main
+gh pr create --base develop --title "chore: back-merge main into develop" --body ""
+gh pr merge --merge --delete-branch
+```
+
+**Hotfix**
+
+```bash
+git fetch
+git switch -c fix/urgent-thing origin/main
+# commit, push, then
+gh pr create --base main --fill
+gh pr merge --squash        # release, then back-merge main into develop as above
+```
+
+**Tags**
+
+```bash
+git fetch --tags
+git tag --list 'v*' --sort=-v:refname   # releases, newest first
+git show v1.0.0                         # what a release contains
+git describe --tags                     # the latest release before HEAD, e.g. v1.0.0-3-g43bc14f
+git switch --detach v1.0.0              # look around a release (detached HEAD)
+git switch -c fix/x v1.0.0              # or branch from it to change something
+```
+
+**Rebase your own, unshared branch** (optional, before review)
+
+```bash
+git fetch
+git rebase origin/develop               # replay your commits on the latest develop
+# on conflict: edit, git add <files>, git rebase --continue   (or git rebase --abort)
+git push --force-with-lease             # only on your branch, never main or develop
+```
+
+**Look around**
+
+```bash
+git log --oneline --graph --decorate -20      # recent history as a graph
+git log --oneline --no-merges "$last"..origin/develop ^origin/main  # unreleased; $last: Release
+git diff origin/develop...HEAD                # what your branch changes since it forked
+git show <hash>                               # one commit
+git blame -L 40,60 src/main/java/Foo.java     # who last changed these lines, and when
+```
+
+**Undo**
+
+| Situation | Command |
+|---|---|
+| Discard unstaged edits to a file | `git restore <file>` |
+| Unstage a file, keeping the edits | `git restore --staged <file>` |
+| Undo the last commit, keeping its changes staged (not pushed yet) | `git reset --soft HEAD~1` |
+| Undo a commit that's already pushed | `git revert <hash>`: a new commit that reverses it |
+| Put work aside to switch branches | `git stash push -m "wip"`, later `git stash pop` |
+| Find a commit you "lost" (after a reset or rebase) | `git reflog`, then `git switch -c rescue <hash>` |
+
+Prefer `revert` over `reset` for anything already pushed: `reset` rewrites history others may
+have.

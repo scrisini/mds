@@ -19,6 +19,8 @@ import com.mds.exchange.MarketStreamManager;
 import com.mds.math.Decimal;
 import com.mds.model.AggregatedPrice;
 import com.mds.model.MarketPair;
+import com.mds.model.QuoteFailure;
+import org.assertj.core.api.InstanceOfAssertFactories;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
@@ -61,6 +63,19 @@ class PriceServiceTest {
         assertThat(result.failures()).extracting("exchange", "reason").containsExactly(
                 tuple("kraken", "stale, last update 2026-10-21T11:58:00Z"),
                 tuple("kucoin", "awaiting first update"));
+    }
+
+    @Test
+    void withoutAFreshPriceAggregateFailsWithTheReasonsAndCurrentIsEmpty() {
+        when(clock.instant()).thenReturn(NOW);
+
+        assertThatThrownBy(() -> service.aggregate(BTC_USDT))
+                .isInstanceOf(PriceUnavailableException.class)
+                .extracting(e -> ((PriceUnavailableException) e).failures())
+                .asInstanceOf(InstanceOfAssertFactories.list(QuoteFailure.class))
+                .extracting(QuoteFailure::exchange)
+                .containsExactly("binance", "kraken", "kucoin");
+        assertThat(service.current(BTC_USDT)).isEmpty();
     }
 
     @Test
