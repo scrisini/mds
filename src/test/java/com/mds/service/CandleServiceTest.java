@@ -138,6 +138,32 @@ class CandleServiceTest {
     }
 
     @Test
+    void closesTheHourCandleOnTheHourWhileTheDayContinues() {
+        service.start();
+        trade("kraken", "100");
+        trade("kraken", "104");
+        clock.set(MORNING.plusSeconds(3600));
+        trade("kraken", "110");
+
+        Candle hour = current("kraken", CandlePeriod.HOUR);
+        assertThat(hour.start()).isEqualTo(MORNING.plusSeconds(3600));
+        assertThat(hour.open()).isEqualTo(d("110"));
+        assertThat(current("kraken", CandlePeriod.DAY).open()).isEqualTo(d("100")); // same day
+
+        service.flush();
+        assertThat(lastBatch()).anySatisfy(c -> {
+            assertThat(c.source()).isEqualTo("kraken");
+            assertThat(c.period()).isEqualTo(CandlePeriod.HOUR);
+            assertThat(c.start()).isEqualTo(MORNING);
+            assertThat(List.of(c.open(), c.high(), c.low(), c.close()))
+                    .containsExactly(d("100"), d("104"), d("100"), d("104"));
+            assertThat(c.complete()).isTrue();
+        });
+        assertThat(lastBatch()).filteredOn(c -> c.period() == CandlePeriod.DAY)
+                .allSatisfy(c -> assertThat(c.complete()).isFalse());
+    }
+
+    @Test
     void endedPeriodWithoutUpdatesIsClosedAndNextOneSeededAtLastClose() {
         service.start();
         trade("kraken", "100");

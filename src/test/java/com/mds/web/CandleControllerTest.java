@@ -72,6 +72,14 @@ class CandleControllerTest {
     }
 
     @Test
+    void hourlyCandlesDefaultToTheLast48Hours() throws Exception {
+        mvc.perform(get("/api/v1/candles/BTC-USDT?period=hour")).andExpect(status().isOk());
+
+        verify(repository).findCandles(BTC_USDT, CandleService.INDEX, CandlePeriod.HOUR,
+                Instant.parse("2026-10-19T12:00:00Z"), NOW, 1000);
+    }
+
+    @Test
     void aFromAfterTheClockIsRejected() throws Exception {
         mvc.perform(get("/api/v1/candles/BTC-USDT?from=2026-10-22T00:00:00Z")).andExpect(status().isBadRequest());
     }
