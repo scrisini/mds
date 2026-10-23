@@ -7,6 +7,37 @@ instances form an embedded Hazelcast cluster, so losing one loses no candles (se
 [Running several instances](#running-several-instances)). To run it in production on AWS (ECS or
 EKS behind an ALB), see [`docs/deployment.md`](docs/deployment.md).
 
+## Features
+
+| Feature | What it does | Details |
+|---|---|---|
+| **Market data** | | |
+| Exchange streams | Streams tickers from Binance, Kraken, Bitstamp, KuCoin and Bitfinex over WebSocket, and reconnects by itself | [Configuration](#configuration) |
+| Aggregated prices | Mean, median, VWAP, min, max and best bid/ask per pair across the exchanges, leaving out stale quotes | [REST API](#rest-api) |
+| Real-time streams | Server-Sent Events, and a WebSocket carrying several pairs, each at its own rate (1 to 10 per second, or every change) | [Real-time subscriptions](#real-time-subscriptions-rates) |
+| Stream heartbeats | An SSE comment line or WebSocket ping every 30 s, so load balancers don't close quiet streams (`MDS_STREAM_HEARTBEAT`) | [Timeouts](docs/deployment.md#timeouts) |
+| OHLC candles | Day, week, month and year candles for the index and each exchange, kept across restarts | [OHLC candles](#ohlc-candles) |
+| History | Price snapshots and candles archived in InfluxDB and served over REST | [InfluxDB schema](#influxdb-schema) |
+| Fixed-point prices | Exact decimal arithmetic on a `long`, with configurable precision (`MDS_DECIMAL_SCALE`) | [Decimal precision](#decimal-precision) |
+| **High availability** | | |
+| Clustering | Instances form an embedded Hazelcast cluster: each pair is owned by one instance, and candles live in the cluster with a backup, so losing an instance loses no candles | [Running several instances](#running-several-instances) |
+| Subscriber balancing | An instance with more than its fair share of streams moves its newest clients to the others | [Spreading subscribers](#running-several-instances) |
+| Graceful shutdown | On SIGTERM, streams close first with a signal to reconnect (`MDS-1014`), so clients move to another instance at once | [Stopping an instance](docs/deployment.md#stopping-an-instance) |
+| AWS deployment | ECS on Fargate or EKS behind an ALB, with ready-made files in `deploy/`, timeouts aligned to the web server, and health probes | [`docs/deployment.md`](docs/deployment.md) |
+| **Configuration and security** | | |
+| Parameter Store and Vault | Settings from AWS SSM Parameter Store and secrets from HashiCorp Vault, read at startup; the instance refuses to start if either can't be read | [Configuration and secrets](#configuration-and-secrets) |
+| Restart check | Every 5 minutes, and on demand (`POST /actuator/configcheck`), checks that the stored configuration would let the instance start again, and alerts before a restart would fail | [Checking the stored configuration](#checking-the-stored-configuration) |
+| Production mode | `MDS_MODE=production` refuses to start with settings that are unsafe in production, such as the development token or text logs | [Production mode](#production-mode) |
+| Secrets in git | SOPS-encrypted files under `config/secrets/`; a pre-commit hook and a CI workflow reject plaintext secrets | [Secrets in git (SOPS)](#secrets-in-git-sops) |
+| Outbound proxy | All exchange traffic through a SOCKS5 proxy when one is set, failing closed | [Outgoing proxy](#outgoing-proxy-socks5) |
+| **Operations** | | |
+| Coded logs and runbook | Every operational log line has a stable code (`MDS-nnnn`) with a procedure in the runbook, JSON logs in the Elastic Common Schema, and a request id on every response | [Logging and support](#logging-and-support) |
+| Metrics and health | Micrometer meters (with a `mode` tag), health per dependency, and liveness and readiness probes | [Metrics](#metrics) |
+| **Engineering** | | |
+| Design standards | Written rules on object granularity, one purpose per method, and code the JIT and GC handle well, with this service's decisions | [Design](#design) |
+| Releases | Conventional Commits checked by a hook and in CI; semantic-release tags and publishes each release from `main` | [Contributing](#contributing) |
+| Git guide | Branching, merging, rebasing, back-merging and tags, with a command cheat sheet and an FAQ | [Git guide](#git-guide) |
+
 ```
 exchange WebSockets ──► MarketStreamManager ──► QuoteBook (latest quote per exchange/pair)
                                                    │
