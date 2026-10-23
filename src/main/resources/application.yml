@@ -135,7 +135,8 @@ management:
   endpoints:
     web:
       exposure:
-        include: health,info,metrics,configcheck
+        # prometheus exists only when MDS_PROMETHEUS_ENABLED is true (below)
+        include: health,info,metrics,configcheck,prometheus
   endpoint:
     health:
       show-details: always
@@ -146,6 +147,12 @@ management:
   info:
     env:
       enabled: true
+  # /actuator/prometheus for a Prometheus scraper (the Grafana stack in docker-compose.yml, README
+  # "Dashboards"). Off by default: deployments read metrics their own way.
+  prometheus:
+    metrics:
+      export:
+        enabled: ${MDS_PROMETHEUS_ENABLED:false}
   metrics:
     tags:
       application: mds

@@ -2,7 +2,7 @@
 # Production runs on ECS or EKS (docs/deployment.md).
 #
 #   docker compose up -d                  InfluxDB only; run mds from the IDE or scripts/dev.sh run
-#   docker compose --profile app up -d    InfluxDB and mds in containers (scripts/dev.sh docker)
+#   docker compose --profile app up -d    InfluxDB, mds, Prometheus and Grafana (scripts/dev.sh docker)
 #
 # The mds image is the one production uses, built with buildpacks:
 #   ./gradlew bootBuildImage --imageName=mds:local
@@ -53,6 +53,49 @@ services:
     networks:
       - mds
 
+  # Scrapes mds (/actuator/prometheus) and InfluxDB (/metrics) for Grafana
+  prometheus:
+    profiles: ["app"]
+    image: prom/prometheus:v3.4.1
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.retention.time=7d
+    volumes:
+      - ./config/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    ports:
+      - "${PROMETHEUS_PORT:-9091}:9090"   # not 9090: that is mds gRPC
+    networks:
+      - mds
+
+  # Dashboards (config/grafana/dashboards) on http://localhost:3000, data sources Prometheus and InfluxDB
+  grafana:
+    profiles: ["app"]
+    image: grafana/grafana:12.0.2
+    depends_on:
+      - prometheus
+      - influxdb
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin
+      # dashboards without logging in; sign in as admin to edit
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/mds-health.json
+      # nothing reaches outside the machine
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      GF_ANALYTICS_CHECK_FOR_PLUGIN_UPDATES: "false"
+      GF_NEWS_NEWS_FEED_ENABLED: "false"
+    volumes:
+      - ./config/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./config/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafana-data:/var/lib/grafana
+    ports:
+      - "${GRAFANA_PORT:-3000}:3000"
+    networks:
+      - mds
+
 networks:
   # InfluxDB and mds reach each other by service name (http://influxdb:8086)
   mds:
@@ -61,3 +104,5 @@ networks:
 volumes:
   influxdb-data:
   influxdb-config:
+  prometheus-data:
+  grafana-data:

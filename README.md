@@ -96,11 +96,11 @@ endpoints return 503. The InfluxDB UI is at http://localhost:8086 (user `admin`,
 | `check` | Checks Java, Docker, free ports, and whether the exchanges are reachable from your network |
 | `infra` | Starts InfluxDB with Docker Compose and waits until it's healthy |
 | `run [args…]` | `check` + `infra`, then `./gradlew bootRun`; extra args go to Spring Boot |
-| `docker [--build]` | Runs InfluxDB **and mds** in Docker ([In Docker](#in-docker)); builds the image first if it's missing or with `--build` |
+| `docker [--build]` | Runs InfluxDB, **mds**, Prometheus and Grafana in Docker ([In Docker](#in-docker)); builds the image first if it's missing or with `--build` |
 | `status` | Shows InfluxDB and app health |
 | `test` | Runs the test suite |
-| `stop` | Stops InfluxDB (and mds, if started with `docker`); data is kept in a Docker volume |
-| `reset [--yes]` | Removes the containers **and deletes all stored InfluxDB data** (asks first unless `--yes`) |
+| `stop` | Stops the containers (InfluxDB, and the others if started with `docker`); data is kept in Docker volumes |
+| `reset [--yes]` | Removes the containers **and deletes all stored data**: InfluxDB, Prometheus, Grafana (asks first unless `--yes`) |
 
 Settings can be passed as Spring arguments or environment variables (see [Configuration](#configuration)):
 
@@ -120,12 +120,12 @@ MDS_INFLUX_URL=https://influx.example.com MDS_INFLUX_TOKEN=… MDS_INFLUX_ORG=�
 
 ### In Docker
 
-Runs mds itself in a container next to InfluxDB, with the same image as production. Use it to try
-a build as it will be deployed; for day-to-day coding, `scripts/dev.sh run` (or the IDE) restarts
-faster.
+Runs mds itself in a container next to InfluxDB, with the same image as production, plus Prometheus
+and Grafana with [dashboards](#dashboards) for both services. Use it to try a build as it will be
+deployed; for day-to-day coding, `scripts/dev.sh run` (or the IDE) restarts faster.
 
 **You need** Docker with Compose v2 and at least 2 GiB of memory to spare for Docker (Docker Desktop:
-Settings → Resources), free ports 8080, 9090 and 8086, and a JDK to build the image (as in
+Settings → Resources), free ports 8080, 9090, 8086, 3000 and 9091, and a JDK to build the image (as in
 [Prerequisites](#prerequisites)). No other setup: the repository's defaults work as they are.
 
 **1. Build the image** (once, then after each code change you want to try):
@@ -137,7 +137,7 @@ Settings → Resources), free ports 8080, 9090 and 8086, and a JDK to build the 
 It's built with Cloud Native Buildpacks, as for production (`docs/deployment.md` "Container
 images"), and needs no Dockerfile. The first build downloads the buildpacks (a few minutes).
 
-**2. Start InfluxDB and mds:**
+**2. Start InfluxDB, mds, Prometheus and Grafana:**
 
 ```bash
 docker compose --profile app up -d
@@ -152,32 +152,35 @@ mds starts once InfluxDB is healthy. Without `--profile app`, compose starts onl
 curl localhost:8080/actuator/health/readiness   # {"status":"UP"} after 10 to 20 seconds
 curl localhost:8080/api/v1/prices/BTC-USDT
 docker compose logs -f mds
+open http://localhost:3000                      # Grafana: the dashboards, no login needed
 ```
 
 **4. Stop it**, keeping the data, or start over with an empty database:
 
 ```bash
 docker compose --profile app stop
-docker compose --profile app down --volumes      # deletes all InfluxDB data
+docker compose --profile app down --volumes      # deletes all InfluxDB, Prometheus and Grafana data
 ```
 
 `scripts/dev.sh` does the same in one step each: `docker` builds the image if it's missing (or
-always, with `--build`), starts both and waits until mds is ready; `stop` and `reset` stop or delete
-both containers.
+always, with `--build`), starts everything and waits until mds is ready; `stop` and `reset` stop or
+delete all the containers.
 
 #### How it fits together
 
 ```
-your machine                  Docker network "mds"
-localhost:8080 (HTTP) ──────▶ mds ──── http://influxdb:8086 ───▶ influxdb
-localhost:9090 (gRPC) ──────▶  │                                  ▲
-localhost:8086 (UI, IDE) ──────┼──────────────────────────────────┘
-                               └──▶ exchanges (internet, or MDS_SOCKS_PROXY_HOST)
+your machine                 Docker network "mds"
+localhost:8080 (HTTP) ────▶ mds ─────────────────▶ influxdb ◀──── localhost:8086 (UI, IDE)
+localhost:9090 (gRPC) ────▶  │ ▲                    ▲  ▲
+                             │ └─── prometheus ─────┘  │      ◀──── localhost:9091
+                             │          ▲              │
+localhost:3000 ──────────────┼────▶ grafana ───────────┘
+                             └──▶ exchanges (internet, or MDS_SOCKS_PROXY_HOST)
 ```
 
-Inside the network, mds reaches InfluxDB by its service name, `influxdb`; `localhost` there would
-be the mds container itself. That is why the container needs its own settings rather than the
-defaults in `application.yml`.
+Inside the network, each container reaches the others by service name (`influxdb`, `mds`,
+`prometheus`); `localhost` there would be the container itself. That is why mds in a container
+needs its own settings rather than the defaults in `application.yml`.
 
 #### Settings
 
@@ -194,6 +197,7 @@ variables. Variables in your shell don't reach the container; put them in this f
 | `MDS_ENVIRONMENT` | `docker` | Labels the logs (`service.environment`) |
 | `MDS_LOG_FORMAT` | blank | Text logs; `ecs` for production JSON |
 | `MDS_EXCHANGES`, `MDS_PAIRS` | commented out | Narrow what's streamed; defaults as in [Configuration](#configuration) |
+| `MDS_PROMETHEUS_ENABLED` | `true` | Serves `/actuator/prometheus` for Prometheus. Without it the mds dashboard is empty |
 | `MDS_SOCKS_PROXY_HOST` / `_PORT` | commented out | A proxy on your machine is `host.docker.internal`, not `localhost` |
 
 Any other variable from [Configuration](#configuration) can be added. After editing the file, run
@@ -208,6 +212,8 @@ next to `docker-compose.yml` (ignored by git), for example `MDS_HTTP_PORT=8081`.
 | `MDS_IMAGE` | `mds:local` | The mds image to run, e.g. another tag you built. Never pulled from a registry |
 | `MDS_HTTP_PORT` | `8080` | Host port for REST, SSE, WebSocket and `/actuator` (`scripts/dev.sh docker` takes it from `SERVER_PORT`) |
 | `MDS_GRPC_HOST_PORT` | `9090` | Host port for the [gRPC API](#grpc-api) |
+| `GRAFANA_PORT` | `3000` | Host port for Grafana |
+| `PROMETHEUS_PORT` | `9091` | Host port for the Prometheus UI (not 9090, which is mds gRPC) |
 
 **InfluxDB (`influxdb` service in `docker-compose.yml`).** The `DOCKER_INFLUXDB_INIT_*` values
 create the user `admin` / `admin-password`, the org `mds`, the bucket `prices` and the token
@@ -217,6 +223,31 @@ delete the data (`scripts/dev.sh reset`), and change `config/docker.env` to matc
 **Fixed in `docker-compose.yml`**, as in production (`deploy/`): 1.5 GiB of memory (the JVM sizes
 its heap from it; below 1 GiB mds doesn't start), 192 MiB of direct memory for gRPC,
 `BPL_JAVA_NMT_ENABLED=false`, and 60 seconds to shut down gracefully.
+
+#### Dashboards
+
+Grafana on http://localhost:3000 opens on the first dashboard. Both are in the `mds` folder
+(Dashboards → mds) and refresh every 10 seconds. Viewing needs no login; sign in as `admin` /
+`admin` to edit.
+
+| Dashboard | Data source | Shows |
+|---|---|---|
+| **mds and InfluxDB health** | Prometheus | **Health:** whether each service is up, whether mds's stored configuration would let it restart, uptimes, cluster members. **mds:** heap, CPU, GC and threads; quotes received per exchange, writes to InfluxDB, HTTP requests, real-time subscribers, p99 latencies (README [Latency](#latency)) and InfluxDB call times. **InfluxDB:** memory, goroutines, write and query requests, points written, query duration, disk |
+| **Prices: BTC/USD and ETH/USD** | InfluxDB (Flux) | The latest last-trade price of each pair per exchange, and charts of it over time (`ticker` measurement, `last` field, as archived every `mds.archive.interval`) |
+
+- **Files:** dashboards are JSON in `config/grafana/dashboards/`, loaded at startup. The data
+  sources (uids `prometheus` and `influxdb`) are in `config/grafana/provisioning/`, and the scrape
+  targets in `config/prometheus/prometheus.yml`.
+- **To change a dashboard**, edit it in Grafana (as `admin`), then Dashboard → Export → Export as
+  JSON, and save it over the file in `config/grafana/dashboards/` so others get it. The file is the
+  source: when it changes, Grafana replaces the dashboard with it, UI edits included.
+- **To add a dashboard**, put its JSON file in the same folder and restart Grafana
+  (`docker compose restart grafana`). Use the data source uids above.
+- **Health comes from the scrape**: "UP" means Prometheus reached the service's metrics endpoint
+  in the last few seconds. For mds's own health checks (InfluxDB, exchanges, cluster), see
+  `curl localhost:8080/actuator/health`.
+- mds from the IDE isn't scraped (Prometheus looks for the `mds` container). The prices dashboard
+  works either way, since it reads InfluxDB.
 
 #### Troubleshooting
 
@@ -229,6 +260,9 @@ its heap from it; below 1 GiB mds doesn't start), 192 MiB of direct memory for g
 - **mds exits at once, or `OutOfMemoryError`**: give Docker more memory (2 GiB or more spare).
 - **`/actuator/health` shows `influx` as `DOWN`**: check `docker compose ps` (is InfluxDB healthy?),
   then that the token, org and bucket in `config/docker.env` match the InfluxDB volume (see above).
+- **A dashboard panel says "No data"**: mds or InfluxDB just started (wait 10 to 20 seconds), or,
+  for the mds panels, `MDS_PROMETHEUS_ENABLED` isn't `true` in `config/docker.env`. Prometheus shows
+  each target's state at http://localhost:9091/targets.
 - **Your code changes don't show up**: rebuild the image (step 1, or `scripts/dev.sh docker --build`),
   then run step 2 again.
 - **The first `up` after updating this repository recreates the InfluxDB container** (when its
@@ -454,6 +488,7 @@ Deployed environments take their settings from AWS SSM Parameter Store and their
 | `mds.stream.allowed-origins` | `MDS_STREAM_ALLOWED_ORIGINS` | `*` (browser origins for WebSocket) |
 | `mds.decimal.scale` / `.rounding` | `MDS_DECIMAL_SCALE` / `MDS_DECIMAL_ROUNDING` | `8` / `HALF_EVEN` |
 | `mds.ohlc.zone` / `.flush-interval` | `MDS_OHLC_ZONE` | `UTC` / `10s` |
+| `management.prometheus.metrics.export.enabled` | `MDS_PROMETHEUS_ENABLED` | `false`; `true` serves `/actuator/prometheus` (the Grafana stack in [In Docker](#in-docker) turns it on) |
 | `mds.socks-proxy.host` / `.port` | `MDS_SOCKS_PROXY_HOST` / `MDS_SOCKS_PROXY_PORT` | blank (direct) / `1080` |
 | `mds.influx.url` / `token` / `org` / `bucket` | `MDS_INFLUX_*` | `http://localhost:8086` / `mds-dev-token` (local only; from Vault when deployed) / `mds` / `prices` |
 | `mds.ssm.path` / `.region` / `.endpoint` | `MDS_SSM_PATH` / `MDS_SSM_REGION` / `MDS_SSM_ENDPOINT` | blank = off; see [Configuration and secrets](#configuration-and-secrets) |
@@ -883,7 +918,9 @@ MDS_LOG_FORMAT=ecs scripts/dev.sh run      # JSON logs locally
 
 ## Metrics
 
-Micrometer meters, visible at `/actuator/metrics/{name}` and tagged `application=mds`:
+Micrometer meters, visible at `/actuator/metrics/{name}` and tagged `application=mds`. With
+`MDS_PROMETHEUS_ENABLED=true`, `/actuator/prometheus` serves them all in Prometheus format (dots
+become underscores, e.g. `mds_quotes_received_total`), which the [dashboards](#dashboards) use:
 
 | Meter | Type | Tags |
 |---|---|---|

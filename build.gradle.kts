@@ -28,6 +28,8 @@ dependencies {
     implementation("org.springframework.boot:spring-boot-starter-webmvc")
     implementation("org.springframework.boot:spring-boot-starter-websocket")
     implementation("org.springframework.boot:spring-boot-starter-actuator")
+    // /actuator/prometheus, for the Grafana stack in docker-compose.yml; off unless MDS_PROMETHEUS_ENABLED
+    runtimeOnly("io.micrometer:micrometer-registry-prometheus")
     // gRPC API on its own port (src/main/proto); versions from the Spring Boot BOM
     implementation("org.springframework.boot:spring-boot-starter-grpc-server")
 
