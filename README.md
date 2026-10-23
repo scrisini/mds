@@ -226,14 +226,15 @@ its heap from it; below 1 GiB mds doesn't start), 192 MiB of direct memory for g
 
 #### Dashboards
 
-Grafana on http://localhost:3000 opens on the first dashboard. Both are in the `mds` folder
-(Dashboards → mds) and refresh every 10 seconds. Viewing needs no login; sign in as `admin` /
+Grafana on http://localhost:3000 opens on the first dashboard. All three are in the `mds` folder
+(Dashboards → mds) and refresh on their own (every 10 or 30 seconds). Viewing needs no login; sign in as `admin` /
 `admin` to edit.
 
 | Dashboard | Data source | Shows |
 |---|---|---|
 | **mds and InfluxDB health** | Prometheus | **Health:** whether each service is up, whether mds's stored configuration would let it restart, uptimes, cluster members. **mds:** heap, CPU, GC and threads; quotes received per exchange, writes to InfluxDB, HTTP requests, real-time subscribers, p99 latencies (README [Latency](#latency)) and InfluxDB call times. **InfluxDB:** memory, goroutines, write and query requests, points written, query duration, disk |
 | **Prices: BTC/USD and ETH/USD** | InfluxDB (Flux) | The latest last-trade price of each pair per exchange, and charts of it over time (`ticker` measurement, `last` field, as archived every `mds.archive.interval`) |
+| **Candles: day, week, month and year** | InfluxDB (Flux) | [OHLC candles](#ohlc-candles) for every supported period of the pair and source picked at the top (`index` or an exchange): a candlestick chart per period over its default history range (30 days, 26 weeks, 24 months, 10 years), and a table of each period's current candle with `updates` and `complete` (`ohlc` measurement) |
 
 - **Files:** dashboards are JSON in `config/grafana/dashboards/`, loaded at startup. The data
   sources (uids `prometheus` and `influxdb`) are in `config/grafana/provisioning/`, and the scrape
@@ -246,8 +247,10 @@ Grafana on http://localhost:3000 opens on the first dashboard. Both are in the `
 - **Health comes from the scrape**: "UP" means Prometheus reached the service's metrics endpoint
   in the last few seconds. For mds's own health checks (InfluxDB, exchanges, cluster), see
   `curl localhost:8080/actuator/health`.
-- mds from the IDE isn't scraped (Prometheus looks for the `mds` container). The prices dashboard
-  works either way, since it reads InfluxDB.
+- mds from the IDE isn't scraped (Prometheus looks for the `mds` container). The prices and candles
+  dashboards work either way, since they read InfluxDB.
+- A new InfluxDB has one candle per period (the current one); history builds up a day, week, month
+  or year at a time.
 
 #### Troubleshooting
 
