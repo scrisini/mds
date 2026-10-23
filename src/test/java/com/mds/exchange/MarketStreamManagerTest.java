@@ -23,6 +23,7 @@ import com.mds.support.TestClusters;
 import info.bitrich.xchangestream.core.ProductSubscription;
 import info.bitrich.xchangestream.core.StreamingExchange;
 import info.bitrich.xchangestream.core.StreamingMarketDataService;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import io.reactivex.rxjava3.core.Completable;
 import io.reactivex.rxjava3.core.Observable;
 import io.reactivex.rxjava3.subjects.PublishSubject;
@@ -39,7 +40,7 @@ class MarketStreamManagerTest {
 
     private static final MarketPair BTC_USD = MarketPair.parse("BTC-USD");
 
-    private final QuoteBook book = new QuoteBook(Clock.systemUTC());
+    private final QuoteBook book = new QuoteBook(Clock.systemUTC(), new SimpleMeterRegistry());
     private final StreamingExchange exchange = mock(StreamingExchange.class);
     private final StreamingMarketDataService marketData = mock(StreamingMarketDataService.class);
     private final PublishSubject<Ticker> tickers = PublishSubject.create();

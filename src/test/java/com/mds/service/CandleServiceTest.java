@@ -46,7 +46,8 @@ class CandleServiceTest {
     private static HazelcastInstance member;
 
     private final MutableClock clock = new MutableClock(MORNING);
-    private final QuoteBook book = new QuoteBook(clock);
+    private final SimpleMeterRegistry registry = new SimpleMeterRegistry();
+    private final QuoteBook book = new QuoteBook(clock, new SimpleMeterRegistry());
     private final PriceRepository repository = mock(PriceRepository.class);
     private final List<List<Candle>> written = new ArrayList<>();
     private CandleService service;
@@ -78,7 +79,7 @@ class CandleServiceTest {
         when(streams.exchangesFor(BTC_USD)).thenReturn(List.of("bitstamp", "kraken"));
         PriceService prices = new PriceService(streams, book, new PriceAggregator(), properties, clock);
         Cluster cluster = new Cluster(member, properties, new SimpleMeterRegistry());
-        service = new CandleService(book, prices, repository, cluster, properties, clock, Schedulers.trampoline());
+        service = new CandleService(book, prices, repository, cluster, properties, clock, registry, Schedulers.trampoline());
         when(repository.findLatestCandles(any(), any())).thenReturn(List.of());
         org.mockito.Mockito.doAnswer(inv -> written.add(List.copyOf(inv.getArgument(0))))
                 .when(repository).saveCandles(anyList());
@@ -113,6 +114,7 @@ class CandleServiceTest {
 
         assertThat(service.current(BTC_USD, "kraken")).extracting(Candle::period)
                 .containsExactly(CandlePeriod.values());
+        assertThat(registry.get("mds.candles.lag").timer().count()).as("one per update applied").isEqualTo(5);
     }
 
     @Test

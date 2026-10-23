@@ -25,6 +25,7 @@ import com.mds.math.Decimal;
 import com.mds.model.AggregatedPrice;
 import com.mds.model.MarketPair;
 import com.mds.support.TestClusters;
+import io.micrometer.core.instrument.Timer;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import io.reactivex.rxjava3.disposables.Disposable;
 import io.reactivex.rxjava3.schedulers.Schedulers;
@@ -39,7 +40,8 @@ class PriceStreamServiceTest {
     private static final MarketPair BTC_USDT = MarketPair.parse("BTC-USDT");
 
     private final TestScheduler time = new TestScheduler();
-    private final QuoteBook book = new QuoteBook(Clock.fixed(Instant.parse("2026-10-21T12:00:00Z"), ZoneOffset.UTC));
+    private final QuoteBook book = new QuoteBook(Clock.fixed(Instant.parse("2026-10-21T12:00:00Z"), ZoneOffset.UTC),
+            new SimpleMeterRegistry());
     private final SimpleMeterRegistry registry = new SimpleMeterRegistry();
     private final PriceStreamService service = service(true, 2);
 
@@ -171,6 +173,34 @@ class PriceStreamServiceTest {
     }
 
     // ---- subscriptions ----
+
+    @Test
+    void timesEachEventFromReceiptToTheListener() {
+        trade("100");
+        StreamSubscription subscription = service.open(BTC_USDT, StreamRate.unthrottled(),
+                PriceStreamService.SSE, p -> { }, e -> { }, () -> { });
+        trade("101");
+        trade("102");
+
+        Timer latency = registry.get("mds.stream.latency").tag("transport", "sse").timer();
+        Timer queue = registry.get("mds.stream.queue").tag("transport", "sse").timer();
+        // the current state sent on subscribing is no update, so only the two trades have a latency
+        assertThat(latency.count()).isEqualTo(2);
+        assertThat(queue.count()).isEqualTo(3);
+        assertThat(latency.max(TimeUnit.SECONDS)).isLessThan(1);
+        assertThat(registry.get("mds.stream.latency").tag("transport", "websocket").timer().count()).isZero();
+        subscription.close();
+    }
+
+    @Test
+    void doesNotTimeEventsItCouldNotSend() {
+        StreamSubscription subscription = service.open(BTC_USDT, StreamRate.unthrottled(),
+                PriceStreamService.SSE, p -> { }, e -> { }, () -> { });
+
+        assertThat(registry.get("mds.stream.queue").tag("transport", "sse").timer().count())
+                .as("no exchange has a price yet").isZero();
+        subscription.close();
+    }
 
     @Test
     void openDeliversToTheListenerAndCountsPerTransport() {

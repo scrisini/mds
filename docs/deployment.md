@@ -80,7 +80,9 @@ flowchart LR
 
 Three instances is the smallest count that survives losing an AZ with capacity to spare. Each
 instance is sized for the whole load (`mds.stream.max-subscribers`, 1000 by default), so two can
-carry everything while the third is replaced.
+carry everything while the third is replaced. How many cores, how much memory and
+how much network an instance needs for a given number of exchanges, pairs and subscribers: README
+"Capacity", which has measured figures and worked examples.
 
 ## What survives what
 

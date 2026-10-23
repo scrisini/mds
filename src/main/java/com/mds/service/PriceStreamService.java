@@ -22,6 +22,7 @@ import com.mds.model.QuoteUpdate;
 import io.micrometer.core.instrument.Counter;
 import io.micrometer.core.instrument.Gauge;
 import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.Timer;
 import io.reactivex.rxjava3.core.BackpressureStrategy;
 import io.reactivex.rxjava3.core.Flowable;
 import io.reactivex.rxjava3.core.Maybe;
@@ -47,8 +48,14 @@ import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
  * every change. Either way, a client that can't keep up is sent the latest aggregate when it
  * catches up, never a backlog.
  *
- * <p>Metrics: {@code mds.stream.subscribers} gauge and {@code mds.stream.events} counter, both
- * tagged {@code transport} ({@code sse}/{@code websocket}); events also tagged {@code pair}.
+ * <p>Metrics, all tagged {@code transport} ({@code sse}/{@code websocket}):
+ * <ul>
+ *   <li>{@code mds.stream.subscribers} gauge, and {@code mds.stream.events} counter (also tagged {@code pair});</li>
+ *   <li>{@code mds.stream.latency} timer: from receiving the newest exchange update an event reflects to
+ *       handing the event to the client's connection, including any wait for the client's rate;</li>
+ *   <li>{@code mds.stream.queue} timer: from the moment the client's rate let the event go to handing it
+ *       over, which grows when send threads or connections fall behind.</li>
+ * </ul>
  *
  * <p>Every open stream also gets a heartbeat every {@code mds.stream.heartbeat}, so load balancers
  * and proxies don't close a connection while its pair is quiet: one ticker for all of them, with
@@ -78,6 +85,7 @@ public class PriceStreamService implements SmartLifecycle {
     // by opening order, so shedding can pick the newest
     private final ConcurrentSkipListMap<Long, Subscription> openByAge = new ConcurrentSkipListMap<>();
     private final Map<String, AtomicInteger> subscribersByTransport = new ConcurrentHashMap<>();
+    private final Map<String, StreamTimers> timersByTransport = new ConcurrentHashMap<>();
     private final Flowable<Long> heartbeats;
     private volatile boolean running;
 
@@ -104,6 +112,7 @@ public class PriceStreamService implements SmartLifecycle {
                     .description("Open real-time price subscriptions")
                     .tag("transport", transport)
                     .register(registry);
+            timersByTransport.put(transport, StreamTimers.register(registry, transport));
         }
     }
 
@@ -205,13 +214,11 @@ public class PriceStreamService implements SmartLifecycle {
         }
         AtomicInteger transportCount = reserveSlot(transport);
         Counter events = eventsCounter(pair, transport);
+        StreamTimers timers = timersByTransport.get(transport);
         Subscription subscription = new Subscription(pair, rate, transport, transportCount, onShed);
         openByAge.put(subscription.id, subscription);
-        subscription.disposable.add(updates(pair, rate).subscribe(
-                price -> {
-                    onPrice.accept(price);
-                    events.increment();
-                },
+        subscription.disposable.add(releases(pair, rate).subscribe(
+                release -> deliver(pair, release, onPrice, events, timers),
                 error -> {
                     subscription.close();
                     onError.accept(error);
@@ -301,19 +308,39 @@ public class PriceStreamService implements SmartLifecycle {
 
     /** Aggregates for the pair at the given rate, starting with the current one. */
     Flowable<AggregatedPrice> updates(MarketPair pair, StreamRate rate) {
-        Observable<MarketPair> changes = quoteBook.updates()
-                .map(QuoteUpdate::pair)
-                .filter(pair::equals)
-                .startWithItem(pair);
+        // skipped while no exchange has a fresh quote
+        return releases(pair, rate).concatMapMaybe(release -> Maybe.fromOptional(priceService.current(pair)));
+    }
+
+    /**
+     * Each time the subscriber is due an event, on a send thread: the current state first, then at
+     * the subscriber's rate. Updates pass through as they are, so the only allocation is one
+     * {@link Release} per event sent.
+     */
+    private Flowable<Release> releases(MarketPair pair, StreamRate rate) {
+        Observable<QuoteUpdate> changes = quoteBook.updates()
+                .filter(update -> update.pair().equals(pair))
+                .startWithItem(new QuoteUpdate(pair, null, Release.NOT_AN_UPDATE));
         if (rate.throttled()) {
             changes = changes.throttleLatest(rate.minInterval().toNanos(), TimeUnit.NANOSECONDS,
                     throttleScheduler, true);
         }
-        // skipped while no exchange has a fresh quote
         return changes
+                .map(update -> new Release(update.receivedNanos(), System.nanoTime()))
                 .toFlowable(BackpressureStrategy.LATEST)
-                .observeOn(sendScheduler, false, 1)
-                .concatMapMaybe(p -> Maybe.fromOptional(priceService.current(p)));
+                .observeOn(sendScheduler, false, 1);
+    }
+
+    /** Sends the pair's current aggregate, if there is one, and times how long it took to get out. */
+    private void deliver(MarketPair pair, Release release, PriceListener onPrice, Counter events,
+                         StreamTimers timers) throws Exception {
+        Optional<AggregatedPrice> price = priceService.current(pair);
+        if (price.isEmpty()) {
+            return; // no exchange has a fresh quote
+        }
+        onPrice.accept(price.get());
+        events.increment();
+        timers.record(release, System.nanoTime());
     }
 
     /** One shared tick for every heartbeat; never ticks when {@code interval} is zero. */
@@ -341,6 +368,39 @@ public class PriceStreamService implements SmartLifecycle {
                 .id(Long.toString(id))
                 .name("price")
                 .data(price, MediaType.APPLICATION_JSON));
+    }
+
+    /**
+     * An event the subscriber's rate let go: when mds received the newest update it reflects
+     * ({@link #NOT_AN_UPDATE} for the current state sent on subscribing), and when it was let go.
+     * Both are {@link System#nanoTime()}: durations, not points in time.
+     */
+    private record Release(long receivedNanos, long releasedNanos) {
+
+        static final long NOT_AN_UPDATE = Long.MIN_VALUE;
+    }
+
+    /** The latency and queue timers of one transport, registered once. */
+    private record StreamTimers(Timer latency, Timer queue) {
+
+        static StreamTimers register(MeterRegistry registry, String transport) {
+            return new StreamTimers(
+                    Timer.builder("mds.stream.latency")
+                            .description("From receiving an exchange update to handing it to a subscriber")
+                            .tag("transport", transport)
+                            .register(registry),
+                    Timer.builder("mds.stream.queue")
+                            .description("From a subscriber's rate letting an event go to handing it over")
+                            .tag("transport", transport)
+                            .register(registry));
+        }
+
+        void record(Release release, long sentNanos) {
+            queue.record(sentNanos - release.releasedNanos(), TimeUnit.NANOSECONDS);
+            if (release.receivedNanos() != Release.NOT_AN_UPDATE) {
+                latency.record(sentNanos - release.receivedNanos(), TimeUnit.NANOSECONDS);
+            }
+        }
     }
 
     /** An open subscription; closing it stops its updates and frees its slot, once. */
