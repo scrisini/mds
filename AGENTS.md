@@ -39,7 +39,8 @@ com.mds
 ├── cluster/      Hazelcast member config, Cluster (pair ownership, shared maps), cluster health
 ├── config/       @ConfigurationProperties records (MdsProperties, InfluxProperties), beans, lifecycle logging,
 │                 ProductionSafeguards (what production mode refuses)
-├── configdata/   startup loaders for AWS SSM Parameter Store and Vault (spring.factories)
+├── configdata/   startup loaders for AWS SSM Parameter Store and Vault (spring.factories), and
+│                 ConfigCheck: re-reads them and checks a restart would succeed (/actuator/configcheck)
 ├── logging/      LogEvent catalogue, EventLog, LogFields, RequestIds: logs for production support
 ├── exchange/     SupportedExchange, MarketStreamManager (WebSocket lifecycle), Bitstamp patch
 ├── math/         Decimal fixed-point type and its JSON serializer
@@ -84,6 +85,9 @@ com.mds
   then document them in `application.yml` and the README configuration table. Deployed values come
   from AWS SSM Parameter Store, secrets from Vault (README "Configuration and secrets"); both are
   read at startup by `configdata/` and fail closed.
+  - **Validate in the record** (its compact constructor), not in the bean that uses the value:
+    `ConfigCheck` finds a stored value that would stop a restart by binding the records, so a check
+    that only runs in a bean constructor is invisible to it.
   - **Production mode** (`mds.mode=production`): a new setting that is unsafe in production (a
     development default, something that opens access) gets a rule in
     `ProductionSafeguards.violations`, naming the setting to change, never its value.

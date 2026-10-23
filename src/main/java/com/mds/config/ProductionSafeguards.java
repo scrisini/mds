@@ -12,7 +12,8 @@ import org.springframework.stereotype.Component;
 /**
  * Production mode ({@code mds.mode=production}) refuses settings that are fine on a laptop but unsafe
  * in production. Checked when the instance starts, which any violation stops
- * ({@link LogEvent#PRODUCTION_SETTINGS_UNSAFE}). Outside production mode nothing is checked.
+ * ({@link LogEvent#PRODUCTION_SETTINGS_UNSAFE}), and by {@code ConfigCheck} against the stored
+ * configuration a restart would read. Outside production mode nothing is checked.
  */
 @Slf4j
 @Component

@@ -231,6 +231,7 @@ Deployed environments take their settings from AWS SSM Parameter Store and their
 | Property | Env | Default |
 |---|---|---|
 | `mds.mode` | `MDS_MODE` | `development`; `production` refuses unsafe settings ([Production mode](#production-mode)) |
+| `mds.config-check.interval` | `MDS_CONFIG_CHECK_INTERVAL` | `5m` between [checks of the stored configuration](#checking-the-stored-configuration) |
 | `mds.exchanges` | `MDS_EXCHANGES` | `binance,kraken,bitstamp,kucoin,bitfinex` |
 | `mds.pairs` | `MDS_PAIRS` | `BTC/USDT,ETH/USDT,BTC/USD,ETH/USD` |
 | `mds.connection-timeout` | | `10s` for metadata HTTP calls while connecting |
@@ -292,6 +293,8 @@ neither. Once configured, they **fail closed**: if one can't be read, the instan
 ([MDS-1013](docs/runbook.md#mds-1013)) rather than run on defaults or without its secrets. At
 startup the log names the path and the number of keys loaded
 ([MDS-1011](docs/runbook.md#mds-1011), [MDS-1012](docs/runbook.md#mds-1012)), never the values.
+Because a bad store only shows at the next start, a running instance also
+[checks that a restart would succeed](#checking-the-stored-configuration).
 
 Both are reached **directly**, like InfluxDB: Parameter Store through a VPC endpoint, Vault on the
 private network. They don't go through the outbound proxy.
@@ -347,11 +350,51 @@ curl -s -H 'X-Vault-Token: dev' -d '{"data":{"mds.influx.token":"mds-dev-token"}
 MDS_VAULT_ADDRESS=http://127.0.0.1:8200 MDS_VAULT_TOKEN=dev scripts/dev.sh run
 ```
 
+### Checking the stored configuration
+
+A change in Parameter Store or Vault, an expired credential or a removed permission doesn't affect
+running instances, so it goes unnoticed until the next restart, which then fails: a deploy, a
+crash, a node replacement. To find out first, every instance checks every
+`mds.config-check.interval` (5 minutes) whether it would start again:
+
+1. It reads Parameter Store and Vault exactly as startup does, with the same credentials and login.
+2. It puts the fresh values in place of those it started with and validates them as startup would:
+   every `mds.*` setting binds and passes its own checks (a pair like `BTCUSDT`, a decimal scale of
+   99), [production mode](#production-mode)'s rules pass, and `mds.decimal.*` and `mds.ohlc.zone`
+   still match the running cluster ([MDS-1009](docs/runbook.md#mds-1009)).
+3. It reports the outcome; the instance keeps running on the configuration it started with.
+
+| Where | Restart would succeed | Restart would fail |
+|---|---|---|
+| `GET /actuator/configcheck` (latest), `POST` (check now) | `"restartable": true` | `"restartable": false` and `problems`, each naming the store or setting |
+| `GET /actuator/health`, component `configCheck` | `UP` | `DOWN`, so the overall status is `DOWN` (HTTP 503) |
+| `mds.config.restartable` gauge | 1 | 0 |
+| Log | [MDS-1017](docs/runbook.md#mds-1017) once it recovers | [MDS-1016](docs/runbook.md#mds-1016) (ERROR) at every check |
+
+- **Readiness and liveness are unaffected**, so the load balancer and Kubernetes keep the instance
+  in service: one bad parameter mustn't take every instance out at once. Alert on
+  `mds.config.restartable == 0` or `MDS-1016` instead.
+- **Changed keys** are listed by name in `changed` and logged once
+  ([MDS-1018](docs/runbook.md#mds-1018)), never with values. They take effect at the next restart.
+- **Before a planned restart** or after changing a parameter or secret, check on demand (inside the
+  network; `/actuator` isn't routed through the load balancer):
+
+  ```bash
+  curl -s -X POST <instance>:8080/actuator/configcheck
+  # {"checkedAt":"…","restartable":false,"problems":["mds.decimal: mds.decimal.scale must be between 0 and 18, was 99"],"changed":["mds.decimal.scale"]}
+  ```
+
+- **Each check logs in to Vault** (and revokes the token) like startup does: once per interval per
+  instance. With AppRole, don't limit the secret ID's number of uses (`secret_id_num_uses`), or the
+  checks use it up and the next real start fails.
+- Settings from environment variables and the command line can't change while the instance runs,
+  so they're not re-read; they're validated together with the stores' fresh values.
+
 ### Production mode
 
 `MDS_MODE=production` (`mds.mode`; the default is `development`) says the instance runs in
 production. It shows in the startup log ([MDS-1001](docs/runbook.md#mds-1001), `mds.mode`),
-`/actuator/info`, and as a `mode` tag on every metric.
+`/actuator/info`, the `configCheck` health details, and as a `mode` tag on every metric.
 
 In production mode the instance **refuses to start** ([MDS-1015](docs/runbook.md#mds-1015)) with
 settings that are fine on a laptop but unsafe in production, and names each one to change:
@@ -364,7 +407,8 @@ settings that are fine on a laptop but unsafe in production, and names each one 
 | WebSocket connections from any browser origin | `MDS_STREAM_ALLOWED_ORIGINS=https://app.example.com,…` |
 | `rate=unlimited` allowed | `MDS_STREAM_ALLOW_UNTHROTTLED=false` |
 
-Staging and test environments that need the development
+The configuration check applies the same rules to the stored configuration, so a change that would
+break them is reported before a restart. Staging and test environments that need the development
 defaults run in `development` mode.
 
 ### Secrets in git (SOPS)
@@ -672,7 +716,8 @@ com.mds
 ├── cluster/       Hazelcast member (ClusterConfig), Cluster (pair ownership, shared maps), health
 ├── config/        properties, InfluxDB client, clock, decimal precision, SSE executor, lifecycle logging,
 │                  ProductionSafeguards (what production mode refuses)
-├── configdata/    startup loaders: AWS SSM Parameter Store (SsmConfigData) and Vault (VaultConfigData)
+├── configdata/    startup loaders: AWS SSM Parameter Store (SsmConfigData) and Vault (VaultConfigData);
+│                  ConfigCheck (would a restart succeed?) and its /actuator/configcheck endpoint
 ├── logging/       LogEvent catalogue, EventLog, LogFields, RequestIds
 ├── exchange/      SupportedExchange, MarketStreamManager (WebSocket lifecycle), stream health check
 ├── math/          Decimal (fixed-point) and its JSON serializer
@@ -707,6 +752,7 @@ request as the code.
 | **One InfluxDB boundary** (`PriceRepository`). | Every Flux query is in one class, where interpolated values are checked and every call is timed. | Large for a single class, but it splits naturally by measurement if it grows. |
 | **Ordered lifecycles** (`SmartLifecycle` phases). | `CandleService` loads candles before the first tick and flushes after the last; `MarketStreamManager` connects in between. On shutdown `PriceStreamService` stops first and closes every stream, so clients reconnect to another instance while prices still flow, instead of waiting out the web server's graceful shutdown on a silent stream. Spring stops the Hazelcast member last, so the final flush still reaches the cluster. | Startup order lives in phase numbers, so it's documented on the beans. Every deploy reconnects every client once. |
 | **Fail-closed proxy.** Startup is refused if exchange REST calls wouldn't use SOCKS. | It's a security requirement: a misconfiguration must not leak traffic around the proxy. | An XChange upgrade that changes its proxy handling can't be merged until `SocksProxyTest` passes. |
+| **Check a restart without restarting** (`ConfigCheck`): re-read the stores, swap the fresh values into a copy of the environment and bind it as startup would. | A broken store, credential or value otherwise shows only when an instance restarts, often several at once in a deploy. Binding is the same validation startup does, so validation belongs in the `@ConfigurationProperties` records, where the check sees it. | A Vault login per check per instance. Validation done only in bean constructors isn't covered. |
 | **Production mode refuses, rather than warns about, unsafe settings.** | A warning in a log is easy to miss; a deploy that won't start is caught by the rollout before it serves traffic. | Staging needs `development` mode, or the production setup, to start. |
 | **`Optional` for an expected absence, exceptions for failures.** `PriceService.current` is empty while no exchange has a fresh price; `aggregate` throws `PriceUnavailableException` for REST, which maps it to 503. | "No price yet" is routine at startup and for quiet pairs. Streams and candles check it on every update, where throwing would capture a stack trace each time. | Two methods for one computation. |
 | **Injected `Clock`.** | Tests control time (staleness, period boundaries, throttling with `TestScheduler`). | Every time-dependent bean takes a constructor argument. |

@@ -6,6 +6,8 @@ import java.time.ZoneId;
 import java.util.List;
 import java.util.Locale;
 
+import com.mds.math.Decimal;
+import com.mds.model.MarketPair;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 import org.springframework.boot.context.properties.bind.DefaultValue;
 
@@ -39,6 +41,11 @@ public record MdsProperties(
         @DefaultValue SocksProxy socksProxy,
         @DefaultValue Cluster cluster,
         @DefaultValue("development") Mode mode) {
+
+    /** Fails binding, not a later bean, on a malformed pair, so a check of stored settings sees it too. */
+    public MdsProperties {
+        pairs.forEach(MarketPair::parse);
+    }
 
     /** Where the instance runs. Production refuses unsafe settings; development allows local defaults. */
     public enum Mode {
@@ -102,6 +109,13 @@ public record MdsProperties(
     public record DecimalSettings(
             @DefaultValue("8") int scale,
             @DefaultValue("HALF_EVEN") RoundingMode rounding) {
+
+        public DecimalSettings {
+            if (scale < 0 || scale > Decimal.MAX_SCALE) {
+                throw new IllegalArgumentException(
+                        "mds.decimal.scale must be between 0 and %d, was %d".formatted(Decimal.MAX_SCALE, scale));
+            }
+        }
     }
 
     /**

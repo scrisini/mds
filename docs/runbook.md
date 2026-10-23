@@ -38,7 +38,9 @@ Suggested alerts:
 - `MDS-3202` that isn't followed by an `MDS-3201` within 10 minutes (the cluster lost an instance
   and runs without its spare capacity);
 - the `mds.cluster.members` gauge below the number of instances deployed (instances that didn't
-  join split the candles).
+  join split the candles);
+- `MDS-1016`, or the `mds.config.restartable` gauge at 0 (the stored configuration would stop the
+  next restart: fix it before deploying).
 
 Useful health checks: `GET /actuator/health` (InfluxDB and the cluster), `GET /api/v1/exchanges`
 (each exchange's connection state and last update).
@@ -197,6 +199,38 @@ range, and the full log lines for that request id or code (including `error.stac
   `rate=unlimited` allowed.
 - **Check:** fix each listed setting in Parameter Store, Vault or the deployment's environment,
   then start again. To run without these rules (a test environment), set `MDS_MODE=development`.
+
+<a id="mds-1016"></a>
+### MDS-1016: The stored configuration would stop a restart
+
+- **Level:** ERROR. The instance keeps running on the configuration it started with; the next
+  restart (a deploy, a crash, a node replacement) would fail.
+- **Means:** the configuration check re-read Parameter Store and Vault and found `mds.problems`,
+  for example a store that can no longer be read (`HTTP 403`, an expired Vault secret ID), a value
+  that doesn't validate (`mds.decimal.scale`), a production-mode violation (see
+  [MDS-1015](#mds-1015)), or a change to `mds.decimal.*` or `mds.ohlc.zone` that the running cluster
+  would refuse ([MDS-1009](#mds-1009)). Repeats at every check until fixed.
+- **Check:** fix what each problem names, then confirm with `curl -X POST
+  <instance>:8080/actuator/configcheck` (inside the network): `"restartable": true`. Don't restart
+  or deploy until then. If every instance reports it, the change was made in the store; if one
+  does, look at that instance's credentials (IAM role, Vault login).
+
+<a id="mds-1017"></a>
+### MDS-1017: The stored configuration is good again
+
+- **Level:** INFO. Follows an [MDS-1016](#mds-1016) once its problems are fixed.
+- **Means:** a restart would succeed again.
+- **Check:** nothing.
+
+<a id="mds-1018"></a>
+### MDS-1018: Parameters or secrets changed since startup
+
+- **Level:** INFO. Expected after someone changes a parameter or rotates a secret.
+- **Means:** `mds.keys` names the keys added, removed or changed in Parameter Store or Vault since
+  this instance started (never their values). Running instances keep the values they started with;
+  each picks up the change when it restarts. Logged once per set of changes.
+- **Check:** if the change was meant to apply now, restart the instances one at a time (a rolling
+  deploy). If nobody expected it, find out who changed the store.
 
 ## Requests and business outcomes (2xxx)
 

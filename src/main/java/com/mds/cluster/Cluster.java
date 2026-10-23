@@ -82,7 +82,7 @@ public class Cluster {
     }
 
     /** The values every member must share, e.g. {@code decimal=8 HALF_EVEN, zone=UTC}. */
-    static String sharedSettings(MdsProperties properties) {
+    public static String sharedSettings(MdsProperties properties) {
         return "decimal=%d %s, zone=%s".formatted(properties.decimal().scale(), properties.decimal().rounding(),
                 properties.ohlc().zone());
     }

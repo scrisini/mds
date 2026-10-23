@@ -51,6 +51,12 @@ public enum LogEvent {
             "Shutting down: closed every real-time subscription so its client reconnects to another instance"),
     PRODUCTION_SETTINGS_UNSAFE("MDS-1015", Level.ERROR,
             "Production mode with settings that are unsafe in production; this instance refuses to start"),
+    CONFIG_CHECK_FAILED("MDS-1016", Level.ERROR,
+            "The stored configuration would stop this instance from starting again; fix it before the next restart"),
+    CONFIG_CHECK_PASSED("MDS-1017", Level.INFO,
+            "The stored configuration is good again; a restart would succeed"),
+    CONFIG_CHANGED("MDS-1018", Level.INFO,
+            "Parameters or secrets changed since startup; they take effect when the instance restarts"),
 
     CANDLES_COMPLETED("MDS-2001", Level.INFO,
             "Candles for ended periods completed and written"),
