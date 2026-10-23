@@ -6,6 +6,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
+import java.io.IOException;
 import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.time.Clock;
@@ -16,6 +17,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Optional;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 
 import com.mds.config.MdsProperties;
 import com.mds.exchange.MarketStreamManager;
@@ -24,6 +26,7 @@ import com.mds.model.AggregatedPrice;
 import com.mds.model.MarketPair;
 import com.mds.support.TestClusters;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
+import io.reactivex.rxjava3.disposables.Disposable;
 import io.reactivex.rxjava3.schedulers.Schedulers;
 import io.reactivex.rxjava3.schedulers.TestScheduler;
 import io.reactivex.rxjava3.subscribers.TestSubscriber;
@@ -41,11 +44,15 @@ class PriceStreamServiceTest {
     private final PriceStreamService service = service(true, 2);
 
     private PriceStreamService service(boolean allowUnthrottled, int maxSubscribers) {
+        return service(allowUnthrottled, maxSubscribers, Duration.ofSeconds(30));
+    }
+
+    private PriceStreamService service(boolean allowUnthrottled, int maxSubscribers, Duration heartbeat) {
         MdsProperties properties = new MdsProperties(List.of("binance"), List.of("BTC/USDT"),
                 Duration.ofSeconds(10), Duration.ofSeconds(5), Duration.ofDays(1),
                 new MdsProperties.Archive(false, Duration.ofSeconds(5)),
                 new MdsProperties.Stream(Duration.ofSeconds(1), Duration.ofMillis(100), Duration.ofSeconds(60),
-                        Duration.ofMinutes(30), maxSubscribers, allowUnthrottled, List.of("*")),
+                        Duration.ofMinutes(30), maxSubscribers, allowUnthrottled, List.of("*"), heartbeat),
                 new MdsProperties.DecimalSettings(8, RoundingMode.HALF_EVEN),
                 new MdsProperties.Ohlc(ZoneOffset.UTC, Duration.ofSeconds(10)),
                 new MdsProperties.SocksProxy("", 1080), TestClusters.standalone());
@@ -230,6 +237,66 @@ class PriceStreamServiceTest {
         assertThat(service.subscribers()).isEqualTo(1);
         older.close();
         assertThat(service.shed(5)).isZero();
+    }
+
+    @Test
+    void stoppingDisconnectsEveryClientBeforeTheExchangesStop() {
+        List<String> disconnected = new ArrayList<>();
+        service.start();
+        service.open(BTC_USDT, StreamRate.perSecond(1), PriceStreamService.SSE,
+                p -> { }, e -> { }, () -> disconnected.add("sse"));
+        service.open(BTC_USDT, StreamRate.perSecond(1), PriceStreamService.WEBSOCKET, p -> { }, e -> { },
+                () -> disconnected.add("websocket"));
+
+        service.stop();
+
+        assertThat(disconnected).containsExactlyInAnyOrder("sse", "websocket");
+        assertThat(service.subscribers()).isZero();
+        assertThat(service.isRunning()).isFalse();
+        // Spring stops higher phases first: streams, then exchanges, then candles
+        assertThat(service.getPhase()).isGreaterThan(MarketStreamManager.PHASE);
+    }
+
+    // ---- heartbeat ----
+
+    @Test
+    void heartbeatsAtTheIntervalUntilDisposed() {
+        AtomicInteger beats = new AtomicInteger();
+        Disposable heartbeat = service.heartbeat(beats::incrementAndGet, e -> { });
+
+        time.advanceTimeBy(29, TimeUnit.SECONDS);
+        assertThat(beats).hasValue(0);
+        time.advanceTimeBy(31, TimeUnit.SECONDS);
+        assertThat(beats).hasValue(2);
+
+        heartbeat.dispose();
+        time.advanceTimeBy(5, TimeUnit.MINUTES);
+        assertThat(beats).hasValue(2);
+    }
+
+    @Test
+    void aFailedHeartbeatStopsAndReportsTheError() {
+        List<Throwable> errors = new ArrayList<>();
+        AtomicInteger beats = new AtomicInteger();
+        service.heartbeat(() -> {
+            beats.incrementAndGet();
+            throw new IOException("client gone");
+        }, errors::add);
+
+        time.advanceTimeBy(2, TimeUnit.MINUTES);
+
+        assertThat(beats).hasValue(1);
+        assertThat(errors).singleElement().extracting(Throwable::getMessage).isEqualTo("client gone");
+    }
+
+    @Test
+    void noHeartbeatWhenTurnedOff() {
+        AtomicInteger beats = new AtomicInteger();
+        service(true, 2, Duration.ZERO).heartbeat(beats::incrementAndGet, e -> { });
+
+        time.advanceTimeBy(1, TimeUnit.HOURS);
+
+        assertThat(beats).hasValue(0);
     }
 
     private double gauge(String transport) {

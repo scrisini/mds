@@ -13,10 +13,12 @@ import com.mds.service.PriceStreamService;
 import com.mds.service.StreamCapacityException;
 import com.mds.service.StreamRate;
 import com.mds.service.StreamSubscription;
+import io.reactivex.rxjava3.disposables.Disposable;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.boot.convert.DurationStyle;
 import org.springframework.stereotype.Component;
 import org.springframework.web.socket.CloseStatus;
+import org.springframework.web.socket.PingMessage;
 import org.springframework.web.socket.TextMessage;
 import org.springframework.web.socket.WebSocketSession;
 import org.springframework.web.socket.handler.ConcurrentWebSocketSessionDecorator;
@@ -43,6 +45,9 @@ import tools.jackson.databind.json.JsonMapper;
  * A client that stops reading is disconnected (close code 1008) once its send buffer is full,
  * rather than holding memory on the server. In a cluster, an instance with more than its share of
  * subscribers closes some sockets with code 1013 (try again later): reconnect and subscribe again.
+ * While a socket has a subscription it also gets a ping frame every {@code mds.stream.heartbeat},
+ * which keeps it open through load balancers when its pairs are quiet; browsers answer pings
+ * themselves, so clients see nothing.
  */
 @Slf4j
 @Component
@@ -55,6 +60,7 @@ public class PriceWebSocketHandler extends TextWebSocketHandler {
     private final JsonMapper json;
     private final Map<String, Map<MarketPair, StreamSubscription>> subscriptions = new ConcurrentHashMap<>();
     private final Map<String, WebSocketSession> decorated = new ConcurrentHashMap<>();
+    private final Map<String, Disposable> heartbeats = new ConcurrentHashMap<>();
 
     public PriceWebSocketHandler(PriceStreamService streams, JsonMapper json) {
         this.streams = streams;
@@ -110,6 +116,8 @@ public class PriceWebSocketHandler extends TextWebSocketHandler {
                 error -> closeQuietly(session, error),
                 () -> reconnectElsewhere(session));
         open.put(pair, subscription);
+        heartbeats.computeIfAbsent(session.getId(), id -> streams.heartbeat(
+                () -> session.sendMessage(new PingMessage()), error -> closeQuietly(session, error)));
         send(session, new SubscribedMessage("subscribed", pair.symbol(), rate.toString()));
     }
 
@@ -123,6 +131,9 @@ public class PriceWebSocketHandler extends TextWebSocketHandler {
             return;
         }
         subscription.close();
+        if (open.isEmpty()) {
+            stopHeartbeat(session.getId());
+        }
         send(session, new UnsubscribedMessage("unsubscribed", pair.symbol()));
     }
 
@@ -132,6 +143,7 @@ public class PriceWebSocketHandler extends TextWebSocketHandler {
         if (open != null) {
             open.values().forEach(StreamSubscription::close);
         }
+        stopHeartbeat(session.getId());
         decorated.remove(session.getId());
         log.debug("WebSocket {} closed: {}", session.getId(), status);
     }
@@ -148,7 +160,19 @@ public class PriceWebSocketHandler extends TextWebSocketHandler {
 
     /** Sessions currently tracked (for tests). */
     int trackedSessions() {
-        return Math.max(subscriptions.size(), decorated.size());
+        return Math.max(Math.max(subscriptions.size(), decorated.size()), heartbeats.size());
+    }
+
+    /** Sessions currently sent heartbeats (for tests). */
+    int heartbeatSessions() {
+        return heartbeats.size();
+    }
+
+    private void stopHeartbeat(String sessionId) {
+        Disposable heartbeat = heartbeats.remove(sessionId);
+        if (heartbeat != null) {
+            heartbeat.dispose();
+        }
     }
 
     /** Thread-safe, bounded view of the session: sends come from several subscriptions at once. */

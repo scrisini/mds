@@ -175,6 +175,18 @@ range, and the full log lines for that request id or code (including `error.stac
     login works (`MDS_VAULT_AUTH` and its role, token or secret id); the policy allows `read` on
     `<kv-mount>/data/<path>`.
 
+<a id="mds-1014"></a>
+### MDS-1014: Real-time subscriptions closed for shutdown
+
+- **Level:** INFO. Expected once whenever an instance stops: a deploy, a scale-in or a restart.
+- **Means:** the instance received SIGTERM and closed its `mds.closed` subscriptions before
+  disconnecting from the exchanges. SSE clients got a `reconnect` event and WebSocket clients close
+  code 1013; they reconnect through the load balancer, which no longer routes to this instance.
+- **Check:** nothing, normally. If clients report errors during deploys, check that the load
+  balancer stops routing before SIGTERM: on Kubernetes, the `preStop` sleep and the ALB
+  deregistration delay; on ECS, the deregistration delay (docs/deployment.md "Stopping an
+  instance").
+
 ## Requests and business outcomes (2xxx)
 
 <a id="mds-2001"></a>

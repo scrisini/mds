@@ -1,0 +1,36 @@
+{
+  "cluster": "mds",
+  "serviceName": "mds",
+  "taskDefinition": "mds",
+  "desiredCount": 3,
+  "launchType": "FARGATE",
+  "platformVersion": "LATEST",
+  "networkConfiguration": {
+    "awsvpcConfiguration": {
+      "subnets": ["subnet-CHANGE-a", "subnet-CHANGE-b", "subnet-CHANGE-c"],
+      "securityGroups": ["sg-CHANGE-mds"],
+      "assignPublicIp": "DISABLED"
+    }
+  },
+  "loadBalancers": [
+    {
+      "targetGroupArn": "arn:aws:elasticloadbalancing:ap-southeast-2:123456789012:targetgroup/mds/CHANGE",
+      "containerName": "mds",
+      "containerPort": 8080
+    }
+  ],
+  "serviceRegistries": [
+    {
+      "registryArn": "arn:aws:servicediscovery:ap-southeast-2:123456789012:service/srv-CHANGE"
+    }
+  ],
+  "healthCheckGracePeriodSeconds": 60,
+  "deploymentConfiguration": {
+    "minimumHealthyPercent": 100,
+    "maximumPercent": 134,
+    "deploymentCircuitBreaker": { "enable": true, "rollback": true }
+  },
+  "availabilityZoneRebalancing": "ENABLED",
+  "enableExecuteCommand": false,
+  "propagateTags": "SERVICE"
+}

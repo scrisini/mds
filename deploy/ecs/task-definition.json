@@ -1,0 +1,77 @@
+{
+  "family": "mds",
+  "networkMode": "awsvpc",
+  "requiresCompatibilities": ["FARGATE"],
+  "runtimePlatform": { "operatingSystemFamily": "LINUX", "cpuArchitecture": "ARM64" },
+  "cpu": "1024",
+  "memory": "2048",
+  "executionRoleArn": "arn:aws:iam::123456789012:role/mds-task-execution",
+  "taskRoleArn": "arn:aws:iam::123456789012:role/mds",
+  "containerDefinitions": [
+    {
+      "name": "mds",
+      "image": "123456789012.dkr.ecr.ap-southeast-2.amazonaws.com/mds:1.1.0",
+      "essential": true,
+      "portMappings": [
+        { "name": "http", "containerPort": 8080, "protocol": "tcp" },
+        { "name": "hazelcast", "containerPort": 5701, "protocol": "tcp" }
+      ],
+      "environment": [
+        { "name": "MDS_ENVIRONMENT", "value": "prod" },
+        { "name": "MDS_LOG_FORMAT", "value": "ecs" },
+        { "name": "MDS_CLUSTER_KUBERNETES_SERVICE_DNS", "value": "mds-hz.mds.internal" },
+        { "name": "MDS_INFLUX_URL", "value": "http://influxdb.mds.internal:8086" },
+        { "name": "MDS_SSM_PATH", "value": "/mds/prod/" },
+        { "name": "MDS_VAULT_ADDRESS", "value": "https://vault.internal:8200" },
+        { "name": "MDS_VAULT_AUTH", "value": "app-role" },
+        { "name": "MDS_VAULT_APP_ROLE_ID", "value": "CHANGE" },
+        { "name": "MDS_VAULT_APP_ROLE_SECRET_ID_FILE", "value": "/run/secrets/vault-secret-id" },
+        { "name": "MDS_VAULT_PATH", "value": "mds/prod" },
+        { "name": "BPL_JAVA_NMT_ENABLED", "value": "false" }
+      ],
+      "stopTimeout": 60,
+      "readonlyRootFilesystem": true,
+      "mountPoints": [
+        { "sourceVolume": "tmp", "containerPath": "/tmp" },
+        { "sourceVolume": "run-secrets", "containerPath": "/run/secrets", "readOnly": true }
+      ],
+      "dependsOn": [
+        { "containerName": "vault-secret-id", "condition": "SUCCESS" }
+      ],
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ecs/mds",
+          "awslogs-region": "ap-southeast-2",
+          "awslogs-stream-prefix": "mds",
+          "mode": "non-blocking",
+          "max-buffer-size": "4m"
+        }
+      }
+    },
+    {
+      "name": "vault-secret-id",
+      "image": "public.ecr.aws/docker/library/busybox:1.37",
+      "essential": false,
+      "entryPoint": ["sh", "-c", "umask 077 && printf '%s' \"$SECRET_ID\" > /run/secrets/vault-secret-id && chown 1002:1001 /run/secrets/vault-secret-id"],
+      "secrets": [
+        { "name": "SECRET_ID", "valueFrom": "arn:aws:secretsmanager:ap-southeast-2:123456789012:secret:mds/vault-secret-id" }
+      ],
+      "mountPoints": [
+        { "sourceVolume": "run-secrets", "containerPath": "/run/secrets" }
+      ],
+      "logConfiguration": {
+        "logDriver": "awslogs",
+        "options": {
+          "awslogs-group": "/ecs/mds",
+          "awslogs-region": "ap-southeast-2",
+          "awslogs-stream-prefix": "vault-secret-id"
+        }
+      }
+    }
+  ],
+  "volumes": [
+    { "name": "tmp" },
+    { "name": "run-secrets" }
+  ]
+}

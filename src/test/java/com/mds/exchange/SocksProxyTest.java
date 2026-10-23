@@ -127,7 +127,7 @@ class SocksProxyTest {
         return new MdsProperties(List.of(), List.of("BTC/USDT"), Duration.ofSeconds(10), Duration.ofSeconds(5),
                 Duration.ofSeconds(60), new MdsProperties.Archive(false, Duration.ofSeconds(5)),
                 new MdsProperties.Stream(Duration.ofSeconds(1), Duration.ofMillis(100), Duration.ofSeconds(60),
-                        Duration.ofMinutes(30), 10, true, List.of("*")),
+                        Duration.ofMinutes(30), 10, true, List.of("*"), Duration.ofSeconds(30)),
                 new MdsProperties.DecimalSettings(8, RoundingMode.HALF_EVEN),
                 new MdsProperties.Ohlc(ZoneOffset.UTC, Duration.ofSeconds(10)),
                 proxy, TestClusters.standalone());

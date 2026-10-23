@@ -181,7 +181,7 @@ class ClusterCandlesTest {
                 Duration.ofSeconds(10), Duration.ofSeconds(5), Duration.ofDays(400),
                 new MdsProperties.Archive(true, Duration.ofSeconds(5)),
                 new MdsProperties.Stream(Duration.ofSeconds(1), Duration.ofMillis(100), Duration.ofSeconds(60),
-                        Duration.ofMinutes(30), 10, true, List.of("*")),
+                        Duration.ofMinutes(30), 10, true, List.of("*"), Duration.ofSeconds(30)),
                 new MdsProperties.DecimalSettings(8, RoundingMode.HALF_EVEN),
                 new MdsProperties.Ohlc(ZoneOffset.UTC, Duration.ofSeconds(10)),
                 new MdsProperties.SocksProxy("", 1080), cluster);

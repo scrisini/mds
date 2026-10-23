@@ -142,8 +142,8 @@ com.mds
   - Tests that start members use `TestClusters` (unique names, ports from 5901). Wait for
     `isClusterSafe()` before relying on backups.
 - Real-time clients (SSE and the `/api/v1/ws/prices` WebSocket) both go through
-  `PriceStreamService.open`, which owns rates (`StreamRate`), the subscriber limit, metrics and
-  slow-client handling. Add new transports there rather than re-implementing throttling.
+  `PriceStreamService.open`, which owns rates (`StreamRate`), the subscriber limit, metrics,
+  heartbeats and slow-client handling. Add new transports there rather than re-implementing throttling.
   `WebSocketSession` isn't thread-safe: send only through the `ConcurrentWebSocketSessionDecorator`
   in `PriceWebSocketHandler`.
 - **Outgoing traffic must honour `mds.socks-proxy`** (a security requirement where it's used).
@@ -152,8 +152,14 @@ com.mds
   against a fake SOCKS5 server: a new exchange must pass it, and an XChange upgrade that breaks
   it must not be merged. Don't delete `src/main/resources/rescu.properties` (it makes exchange
   REST calls use SOCKS; startup fails closed without it).
-- `MarketStreamManager` and `CandleService` are `SmartLifecycle` beans; `CandleService` starts
-  first and stops last so it recovers before the first tick and flushes after the last.
+- `PriceStreamService`, `MarketStreamManager` and `CandleService` are `SmartLifecycle` beans
+  (phases in that order, highest first). `CandleService` starts first and stops last, so it
+  recovers before the first tick and flushes after the last; `PriceStreamService` stops first and
+  closes every stream, so clients reconnect elsewhere before the exchanges disconnect.
+- **Deployment** (`docs/deployment.md`, files in `deploy/`): ECS or EKS behind an ALB. Its timeouts
+  must agree with `application.yml` (ALB idle 120 s < `server.tomcat.keep-alive-timeout` 130 s);
+  change both together. `deploy/` holds examples with `CHANGE` placeholders, never real account
+  ids, hosts or secrets.
 
 ## Working agreements
 

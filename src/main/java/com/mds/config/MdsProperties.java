@@ -57,6 +57,9 @@ public record MdsProperties(
      *                         pair on a WebSocket)
      * @param allowUnthrottled whether clients may request {@code rate=unlimited}
      * @param allowedOrigins   browser origins allowed to open WebSockets ({@code *} for any)
+     * @param heartbeat        how often every open stream gets a heartbeat (an SSE comment, a
+     *                         WebSocket ping), so load balancers and proxies keep quiet connections
+     *                         open; zero turns it off
      */
     public record Stream(
             @DefaultValue("1s") Duration defaultThrottle,
@@ -65,7 +68,14 @@ public record MdsProperties(
             @DefaultValue("30m") Duration timeout,
             @DefaultValue("1000") int maxSubscribers,
             @DefaultValue("true") boolean allowUnthrottled,
-            @DefaultValue("*") List<String> allowedOrigins) {
+            @DefaultValue("*") List<String> allowedOrigins,
+            @DefaultValue("30s") Duration heartbeat) {
+
+        public Stream {
+            if (heartbeat.isNegative()) {
+                throw new IllegalArgumentException("mds.stream.heartbeat must not be negative, was " + heartbeat);
+            }
+        }
     }
 
     /**

@@ -1,0 +1,29 @@
+# HTTP for the ALB (target-type ip sends straight to pod IPs; the Service just lists them).
+apiVersion: v1
+kind: Service
+metadata:
+  name: mds
+spec:
+  selector:
+    app.kubernetes.io/name: mds
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+---
+# Headless: its DNS name resolves to every pod's IP, which is how members find each other
+# (MDS_CLUSTER_KUBERNETES_SERVICE_DNS). Not-ready pods are listed too, so pods starting together
+# join one cluster instead of each forming its own.
+apiVersion: v1
+kind: Service
+metadata:
+  name: mds-hz
+spec:
+  clusterIP: None
+  publishNotReadyAddresses: true
+  selector:
+    app.kubernetes.io/name: mds
+  ports:
+    - name: hazelcast
+      port: 5701
+      targetPort: hazelcast
