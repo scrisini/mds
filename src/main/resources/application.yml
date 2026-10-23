@@ -1,6 +1,14 @@
 spring:
   application:
     name: mds
+  config:
+    # Configuration from AWS SSM Parameter Store, then secrets from Vault, read once at startup. Each
+    # does nothing until mds.ssm.path / mds.vault.address is set below ("optional" covers only that:
+    # a configured store that can't be read stops startup). See README "Configuration and secrets";
+    # precedence: command line > environment > Vault > Parameter Store > this file.
+    import:
+      - "optional:mds-ssm:"
+      - "optional:mds-vault:"
   threads:
     virtual:
       enabled: true
@@ -34,6 +42,29 @@ mds:
   socks-proxy:
     host: ${MDS_SOCKS_PROXY_HOST:}
     port: ${MDS_SOCKS_PROXY_PORT:1080}
+  # AWS SSM Parameter Store: /mds/prod/mds/pairs (or /mds/prod/mds.pairs) sets mds.pairs. Blank path = off.
+  # Credentials and region from the AWS SDK default chain; reached directly (VPC endpoint), not proxied.
+  ssm:
+    path: ${MDS_SSM_PATH:}
+    region: ${MDS_SSM_REGION:}
+    endpoint: ${MDS_SSM_ENDPOINT:}
+  # HashiCorp Vault key/value secret whose keys are property names, e.g. mds.influx.token. Blank
+  # address = off; https only (http for localhost). Reached directly on the private network.
+  vault:
+    address: ${MDS_VAULT_ADDRESS:}
+    kv-mount: ${MDS_VAULT_KV_MOUNT:secret}
+    path: ${MDS_VAULT_PATH:mds}
+    kv-version: 2
+    namespace: ${MDS_VAULT_NAMESPACE:}
+    ca-cert: ${MDS_VAULT_CA_CERT:}
+    # token | kubernetes | app-role
+    auth: ${MDS_VAULT_AUTH:token}
+    token: ${MDS_VAULT_TOKEN:}
+    kubernetes:
+      role: ${MDS_VAULT_KUBERNETES_ROLE:}
+    app-role:
+      role-id: ${MDS_VAULT_APP_ROLE_ID:}
+      secret-id-file: ${MDS_VAULT_APP_ROLE_SECRET_ID_FILE:}
   # Embedded Hazelcast cluster: every instance sharing an InfluxDB bucket must join the same one.
   # No members and no Kubernetes service = a cluster of one. Cluster traffic is not proxied, encrypted
   # or authenticated: only other mds instances may reach the port.

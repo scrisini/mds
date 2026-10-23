@@ -141,6 +141,40 @@ range, and the full log lines for that request id or code (including `error.stac
 - **Check:** if the change is a mistake, deploy with the cluster's values. To change them
   deliberately, stop **every** instance, then start them all with the new values.
 
+<a id="mds-1011"></a>
+### MDS-1011: Configuration loaded from AWS SSM Parameter Store
+
+- **Level:** INFO. Normal at startup when `MDS_SSM_PATH` is set.
+- **Means:** `mds.keys` parameters under `mds.path` were read and override `application.yml`.
+  Environment variables and command-line arguments still override them.
+- **Check:** `mds.keys` should match the parameters you expect for this environment. 0 means the
+  path is empty or wrong (it is case-sensitive, e.g. `/mds/prod/`).
+
+<a id="mds-1012"></a>
+### MDS-1012: Secrets loaded from HashiCorp Vault
+
+- **Level:** INFO. Normal at startup when `MDS_VAULT_ADDRESS` is set.
+- **Means:** the secret `mds.path` was read, with `mds.keys` keys; its values override Parameter
+  Store and `application.yml`. A token from a Kubernetes or AppRole login was revoked again after
+  reading. Values are never logged.
+- **Check:** `mds.keys` should match the keys you stored. If a key is missing, the setting falls back
+  to the environment or `application.yml`.
+
+<a id="mds-1013"></a>
+### MDS-1013: Could not load configuration or secrets
+
+- **Level:** ERROR. The instance stops during startup, before logging is set up, so this appears in
+  the startup error (`Application run failed`) in plain text rather than as a JSON line.
+- **Means:** `MDS_SSM_PATH` or `MDS_VAULT_ADDRESS` is set, but reading failed. The message names the
+  store, the path and the reason, for example `HTTP 403: permission denied`, an unknown host or a
+  timeout; never a token or secret value. The instance doesn't fall back to defaults.
+- **Check:**
+  - **Parameter Store:** the instance's IAM role allows `ssm:GetParametersByPath` on the path (and
+    `kms:Decrypt` for SecureString), and the SSM VPC endpoint is reachable.
+  - **Vault:** `MDS_VAULT_ADDRESS` is reachable and its certificate trusted (`MDS_VAULT_CA_CERT`); the
+    login works (`MDS_VAULT_AUTH` and its role, token or secret id); the policy allows `read` on
+    `<kv-mount>/data/<path>`.
+
 ## Requests and business outcomes (2xxx)
 
 <a id="mds-2001"></a>

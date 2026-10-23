@@ -1,0 +1,13 @@
+# SOPS: which keys encrypt which files (README "Secrets in git (SOPS)"). Only files under
+# config/secrets/ named *.enc.env, *.enc.yaml or *.enc.json can be encrypted, and
+# scripts/check-secrets.sh rejects anything there that isn't.
+#
+# Each developer, and CI, has an age key pair (`age-keygen -o ~/.config/sops/age/keys.txt`). Put
+# every public key (age1...) here, comma-separated, then re-encrypt the files for the new list:
+#   for f in config/secrets/*.enc.*; do sops updatekeys -y "$f"; done
+# Deployed environments read secrets from Vault, not from these files.
+creation_rules:
+  - path_regex: ^config/secrets/.+\.enc\.(env|ya?ml|json)$
+    # replace with the team's age public keys; SOPS refuses to encrypt until then
+    age: >-
+      age1replace-with-the-teams-public-keys

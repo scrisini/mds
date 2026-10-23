@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+#
+# pre-commit hook: rejects plaintext secrets in the staged files (scripts/check-secrets.sh).
+# Installed with the other hooks by `scripts/dev.sh hooks`.
+
+set -euo pipefail
+
+exec "$(git rev-parse --show-toplevel)/scripts/check-secrets.sh"
