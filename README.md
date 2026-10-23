@@ -96,10 +96,11 @@ endpoints return 503. The InfluxDB UI is at http://localhost:8086 (user `admin`,
 | `check` | Checks Java, Docker, free ports, and whether the exchanges are reachable from your network |
 | `infra` | Starts InfluxDB with Docker Compose and waits until it's healthy |
 | `run [args…]` | `check` + `infra`, then `./gradlew bootRun`; extra args go to Spring Boot |
+| `docker [--build]` | Runs InfluxDB **and mds** in Docker ([In Docker](#in-docker)); builds the image first if it's missing or with `--build` |
 | `status` | Shows InfluxDB and app health |
 | `test` | Runs the test suite |
-| `stop` | Stops InfluxDB; data is kept in a Docker volume |
-| `reset [--yes]` | Removes the InfluxDB container **and deletes all stored data** (asks first unless `--yes`) |
+| `stop` | Stops InfluxDB (and mds, if started with `docker`); data is kept in a Docker volume |
+| `reset [--yes]` | Removes the containers **and deletes all stored InfluxDB data** (asks first unless `--yes`) |
 
 Settings can be passed as Spring arguments or environment variables (see [Configuration](#configuration)):
 
@@ -117,10 +118,127 @@ MDS_INFLUX_URL=https://influx.example.com MDS_INFLUX_TOKEN=… MDS_INFLUX_ORG=�
   scripts/dev.sh run
 ```
 
+### In Docker
+
+Runs mds itself in a container next to InfluxDB, with the same image as production. Use it to try
+a build as it will be deployed; for day-to-day coding, `scripts/dev.sh run` (or the IDE) restarts
+faster.
+
+**You need** Docker with Compose v2 and at least 2 GiB of memory to spare for Docker (Docker Desktop:
+Settings → Resources), free ports 8080, 9090 and 8086, and a JDK to build the image (as in
+[Prerequisites](#prerequisites)). No other setup: the repository's defaults work as they are.
+
+**1. Build the image** (once, then after each code change you want to try):
+
+```bash
+./gradlew bootBuildImage --imageName=mds:local
+```
+
+It's built with Cloud Native Buildpacks, as for production (`docs/deployment.md` "Container
+images"), and needs no Dockerfile. The first build downloads the buildpacks (a few minutes).
+
+**2. Start InfluxDB and mds:**
+
+```bash
+docker compose --profile app up -d
+```
+
+mds starts once InfluxDB is healthy. Without `--profile app`, compose starts only InfluxDB (what
+`scripts/dev.sh run` and the IDE use).
+
+**3. Check it's running:**
+
+```bash
+curl localhost:8080/actuator/health/readiness   # {"status":"UP"} after 10 to 20 seconds
+curl localhost:8080/api/v1/prices/BTC-USDT
+docker compose logs -f mds
+```
+
+**4. Stop it**, keeping the data, or start over with an empty database:
+
+```bash
+docker compose --profile app stop
+docker compose --profile app down --volumes      # deletes all InfluxDB data
+```
+
+`scripts/dev.sh` does the same in one step each: `docker` builds the image if it's missing (or
+always, with `--build`), starts both and waits until mds is ready; `stop` and `reset` stop or delete
+both containers.
+
+#### How it fits together
+
+```
+your machine                  Docker network "mds"
+localhost:8080 (HTTP) ──────▶ mds ──── http://influxdb:8086 ───▶ influxdb
+localhost:9090 (gRPC) ──────▶  │                                  ▲
+localhost:8086 (UI, IDE) ──────┼──────────────────────────────────┘
+                               └──▶ exchanges (internet, or MDS_SOCKS_PROXY_HOST)
+```
+
+Inside the network, mds reaches InfluxDB by its service name, `influxdb`; `localhost` there would
+be the mds container itself. That is why the container needs its own settings rather than the
+defaults in `application.yml`.
+
+#### Settings
+
+**mds settings: `config/docker.env`.** Compose passes this file to the mds container as environment
+variables. Variables in your shell don't reach the container; put them in this file.
+
+| Variable | Value in the file | Notes |
+|---|---|---|
+| `MDS_INFLUX_URL` | `http://influxdb:8086` | **Required.** The service name on the compose network |
+| `MDS_INFLUX_TOKEN` | `mds-dev-token` | **Required.** Must equal `DOCKER_INFLUXDB_INIT_ADMIN_TOKEN` (below) |
+| `MDS_INFLUX_ORG` | `mds` | **Required.** Must equal `DOCKER_INFLUXDB_INIT_ORG` |
+| `MDS_INFLUX_BUCKET` | `prices` | **Required.** Must equal `DOCKER_INFLUXDB_INIT_BUCKET` |
+| `MDS_MODE` | `development` | `production` would refuse the development token and stop |
+| `MDS_ENVIRONMENT` | `docker` | Labels the logs (`service.environment`) |
+| `MDS_LOG_FORMAT` | blank | Text logs; `ecs` for production JSON |
+| `MDS_EXCHANGES`, `MDS_PAIRS` | commented out | Narrow what's streamed; defaults as in [Configuration](#configuration) |
+| `MDS_SOCKS_PROXY_HOST` / `_PORT` | commented out | A proxy on your machine is `host.docker.internal`, not `localhost` |
+
+Any other variable from [Configuration](#configuration) can be added. After editing the file, run
+`docker compose --profile app up -d` again; compose recreates the mds container with the new values.
+Leave `MDS_SSM_PATH` and `MDS_VAULT_ADDRESS` unset: there are no Parameter Store or Vault locally.
+
+**Compose parameters.** Optional; set them in your shell, on the command line or in a `.env` file
+next to `docker-compose.yml` (ignored by git), for example `MDS_HTTP_PORT=8081`.
+
+| Variable | Default | What it changes |
+|---|---|---|
+| `MDS_IMAGE` | `mds:local` | The mds image to run, e.g. another tag you built. Never pulled from a registry |
+| `MDS_HTTP_PORT` | `8080` | Host port for REST, SSE, WebSocket and `/actuator` (`scripts/dev.sh docker` takes it from `SERVER_PORT`) |
+| `MDS_GRPC_HOST_PORT` | `9090` | Host port for the [gRPC API](#grpc-api) |
+
+**InfluxDB (`influxdb` service in `docker-compose.yml`).** The `DOCKER_INFLUXDB_INIT_*` values
+create the user `admin` / `admin-password`, the org `mds`, the bucket `prices` and the token
+`mds-dev-token`. They apply **only when the data volume is first created**: after changing them,
+delete the data (`scripts/dev.sh reset`), and change `config/docker.env` to match.
+
+**Fixed in `docker-compose.yml`**, as in production (`deploy/`): 1.5 GiB of memory (the JVM sizes
+its heap from it; below 1 GiB mds doesn't start), 192 MiB of direct memory for gRPC,
+`BPL_JAVA_NMT_ENABLED=false`, and 60 seconds to shut down gracefully.
+
+#### Troubleshooting
+
+- **`No such image: mds:local`**: build the image first (step 1).
+- **`port is already allocated`**: something else uses 8080, 9090 or 8086, often mds run from the
+  IDE. Stop it, or pick other host ports with `MDS_HTTP_PORT` / `MDS_GRPC_HOST_PORT`.
+- **Don't run mds from the IDE at the same time** against this InfluxDB, even on another port: the
+  two can't form one cluster across the Docker network, so their OHLC candles overwrite each other
+  ([Running several instances](#running-several-instances)).
+- **mds exits at once, or `OutOfMemoryError`**: give Docker more memory (2 GiB or more spare).
+- **`/actuator/health` shows `influx` as `DOWN`**: check `docker compose ps` (is InfluxDB healthy?),
+  then that the token, org and bucket in `config/docker.env` match the InfluxDB volume (see above).
+- **Your code changes don't show up**: rebuild the image (step 1, or `scripts/dev.sh docker --build`),
+  then run step 2 again.
+- **The first `up` after updating this repository recreates the InfluxDB container** (when its
+  network changed). The data is kept in the `influxdb-data` volume.
+
 ### Without the script
 
 ```bash
 docker compose up -d            # InfluxDB on :8086 (org=mds, bucket=prices, token=mds-dev-token)
+docker compose --profile app up -d   # also mds in Docker (see "In Docker" above)
 ./gradlew bootRun               # API on :8080
 ./gradlew test                  # tests (no InfluxDB or network needed)
 ```
