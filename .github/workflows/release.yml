@@ -1,6 +1,7 @@
 # Publishes a release on every push to main (the squash of a release PR from develop).
-# semantic-release reads the commits since the last tag, picks the version from .releaserc.json,
-# then creates the vX.Y.Z tag and a GitHub release with notes. The first release is v1.0.0.
+# semantic-release reads the commits since the last tag, picks the version from .releaserc.mjs,
+# then creates the vX.Y.Z tag and a GitHub release with notes (a line per change, then each
+# change's body under "Details"). The first release is v1.0.0.
 # The tests run first: nothing is released from a red build.
 name: release
 

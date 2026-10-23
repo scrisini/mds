@@ -212,8 +212,9 @@ com.mds
 
 Commits follow [Conventional Commits](https://www.conventionalcommits.org/), enforced locally by
 `.githooks/commit-msg` (install with `scripts/dev.sh hooks`) and on pull requests by the
-`commitlint` workflow, both using `.commitlintrc.json`. semantic-release (`.releaserc.json`) reads
-them to pick the next version; the `release` workflow (`.github/workflows/release.yml`) runs it on
+`commitlint` workflow, both using `.commitlintrc.json`. semantic-release (`.releaserc.mjs`) reads
+them to pick the next version and write the release notes, whose "Details" section is each
+released commit's body (trailers left out), so write bodies for readers; the `release` workflow (`.github/workflows/release.yml`) runs it on
 every push to `main`, after the tests pass, and publishes the tag and GitHub release. Never use
 `git commit --no-verify`; if the hook rejects a message, fix the message. Full guide: README
 "Contributing".
