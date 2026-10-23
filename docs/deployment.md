@@ -23,6 +23,7 @@ secrets").
 - [Container images](#container-images)
 - [Load balancer](#load-balancer)
 - [Timeouts](#timeouts)
+- [gRPC](#grpc)
 - [Stopping an instance](#stopping-an-instance)
 - [Option A: ECS on Fargate](#option-a-ecs-on-fargate)
 - [Option B: Kubernetes (EKS)](#option-b-kubernetes-eks)
@@ -117,6 +118,9 @@ docker push 123456789012.dkr.ecr.ap-southeast-2.amazonaws.com/mds:1.1.0
   (thread stacks, code cache, metaspace). 1.5 GiB gives about 870 MiB of heap. Below 1 GiB the heap
   is too small and mds stops with `OutOfMemoryError` at startup. Three instances use about 200 MiB
   of heap each at rest.
+- **Direct memory for gRPC:** Netty buffers gRPC traffic outside the heap, and the image caps that
+  at 10 MB. `deploy/` sets `JAVA_TOOL_OPTIONS=-XX:MaxDirectMemorySize=192m` (taken from the heap
+  budget), enough for thousands of streams whose clients have stopped reading (README "Capacity").
 - **Set `BPL_JAVA_NMT_ENABLED=false`**: otherwise the image prints a native-memory report to stdout
   at exit, which breaks the one-JSON-object-per-line logs. The files in `deploy/` set it.
 
@@ -197,6 +201,33 @@ subscription, a ping frame (answered by the browser or client library; page scri
 Clients should still reconnect on any close: `EventSource` does so by itself, and WebSocket clients
 must handle close codes 1001, 1006 and 1013 by reconnecting and subscribing again. Any other proxy
 in the path (a corporate proxy, nginx) needs an idle timeout above 30 s too.
+
+## gRPC
+
+The gRPC API (README "gRPC API") listens on its own port, 9090, and goes through the same ALB:
+
+- **A second target group:** target type `ip`, protocol HTTP, port 9090, **protocol version
+  `GRPC`**, with the same deregistration delay (30 s) and least outstanding requests. An ALB serves
+  gRPC only on an **HTTPS listener** (HTTP/2 over TLS); add a rule there for `/mds.v1.MarketData/*`,
+  or give gRPC its own host name (`grpc.mds.example.com` in `deploy/`). Reflection and
+  `grpc.health.v1` aren't routed, so they stay inside the VPC.
+- **Health check:** path `/mds.v1.MarketData/ListPairs`, success code `0` (the gRPC status). An ALB
+  can't name a service in a `grpc.health.v1` check, and the overall health includes InfluxDB, which
+  mustn't take every instance out at once; `ListPairs` succeeds while the instance serves gRPC.
+- **Timeouts:** streams carry the same 30 s heartbeat as SSE (a `Heartbeat` event), so the 120 s
+  idle timeout holds. On shutdown the streams end with `UNAVAILABLE` before the gRPC server waits
+  for calls (`spring.grpc.server.shutdown.grace-period`, 30 s), so clients reconnect at once.
+- **Security groups / NetworkPolicy:** 9090 open to the ALB, like 8080.
+
+```bash
+aws elbv2 create-target-group --name mds-grpc --target-type ip --protocol HTTP --protocol-version GRPC \
+  --port 9090 --vpc-id vpc-CHANGE --health-check-path /mds.v1.MarketData/ListPairs --matcher GrpcCode=0 \
+  --health-check-interval-seconds 10 --health-check-timeout-seconds 5 \
+  --healthy-threshold-count 2 --unhealthy-threshold-count 3
+```
+
+On EKS, `deploy/k8s/ingress-grpc.yaml` creates it on the same ALB (IngressGroup `mds`); on ECS,
+`deploy/ecs/service.json` registers both target groups.
 
 ## Stopping an instance
 
@@ -301,7 +332,7 @@ tasks to join, so this applies only when starting from zero.
 | Group | Inbound | From |
 |---|---|---|
 | `alb` | 443, 80 | the internet (or your clients' ranges) |
-| `mds` | 8080 | `alb` |
+| `mds` | 8080, 9090 | `alb` |
 | `mds` | 5701 | `mds` itself: Hazelcast traffic is neither encrypted nor authenticated, so nothing else may reach it |
 | `influxdb` | 8086 | `mds` |
 

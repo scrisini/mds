@@ -23,3 +23,6 @@ data:
   MDS_STREAM_ALLOW_UNTHROTTLED: "false"
   # The image's launcher prints a native-memory report to stdout at exit; keep stdout JSON only
   BPL_JAVA_NMT_ENABLED: "false"
+  # gRPC buffers outside the heap, up to 32 KB per stream while a client isn't reading; the image's
+  # default of 10 MB would be too little for thousands of streams. Taken from the heap budget.
+  JAVA_TOOL_OPTIONS: -XX:MaxDirectMemorySize=192m

@@ -1,0 +1,38 @@
+# The gRPC API (port 9090) on the same ALB as ingress.yaml (IngressGroup "mds"): a target group with
+# protocol version GRPC, on an HTTPS listener (an ALB serves gRPC only over TLS). docs/deployment.md "gRPC".
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: mds-grpc
+  annotations:
+    alb.ingress.kubernetes.io/group.name: mds
+    alb.ingress.kubernetes.io/scheme: internet-facing
+    alb.ingress.kubernetes.io/target-type: ip
+    alb.ingress.kubernetes.io/listen-ports: '[{"HTTPS": 443}]'
+    alb.ingress.kubernetes.io/certificate-arn: arn:aws:acm:ap-southeast-2:123456789012:certificate/CHANGE
+    alb.ingress.kubernetes.io/ssl-policy: ELBSecurityPolicy-TLS13-1-2-2021-06
+    alb.ingress.kubernetes.io/backend-protocol-version: GRPC
+    alb.ingress.kubernetes.io/target-group-attributes: >-
+      deregistration_delay.timeout_seconds=30,load_balancing.algorithm.type=least_outstanding_requests
+    # an ALB health check can't name a gRPC service, so it calls ListPairs: status 0 while the
+    # instance serves gRPC
+    alb.ingress.kubernetes.io/healthcheck-path: /mds.v1.MarketData/ListPairs
+    alb.ingress.kubernetes.io/success-codes: "0"
+    alb.ingress.kubernetes.io/healthcheck-interval-seconds: "10"
+    alb.ingress.kubernetes.io/healthcheck-timeout-seconds: "5"
+    alb.ingress.kubernetes.io/healthy-threshold-count: "2"
+    alb.ingress.kubernetes.io/unhealthy-threshold-count: "3"
+spec:
+  ingressClassName: alb
+  rules:
+    - host: grpc.mds.example.com          # CHANGE
+      http:
+        paths:
+          # only the API: reflection and grpc.health stay inside the cluster
+          - path: /mds.v1.MarketData/
+            pathType: Prefix
+            backend:
+              service:
+                name: mds
+                port:
+                  name: grpc

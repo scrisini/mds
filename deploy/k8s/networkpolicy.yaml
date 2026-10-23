@@ -19,6 +19,7 @@ spec:
         - port: 5701
     - ports:
         - port: 8080
+        - port: 9090
 ---
 # InfluxDB takes connections from mds only.
 apiVersion: networking.k8s.io/v1

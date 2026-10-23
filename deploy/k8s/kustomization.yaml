@@ -16,6 +16,7 @@ resources:
   - pdb.yaml
   - networkpolicy.yaml
   - ingress.yaml
+  - ingress-grpc.yaml
   - influxdb.yaml
 images:
   - name: mds

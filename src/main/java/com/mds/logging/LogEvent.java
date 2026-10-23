@@ -57,6 +57,8 @@ public enum LogEvent {
             "The stored configuration is good again; a restart would succeed"),
     CONFIG_CHANGED("MDS-1018", Level.INFO,
             "Parameters or secrets changed since startup; they take effect when the instance restarts"),
+    GRPC_SERVER_STARTED("MDS-1019", Level.INFO,
+            "gRPC server listening for the MarketData API"),
 
     CANDLES_COMPLETED("MDS-2001", Level.INFO,
             "Candles for ended periods completed and written"),
@@ -104,6 +106,8 @@ public enum LogEvent {
             "Unexpected failure while handling a request; the caller got HTTP 500"),
     CANDLE_UPDATES_STOPPED("MDS-9002", Level.ERROR,
             "Candle updates stopped after an unexpected failure; candles stay frozen until restart"),
+    GRPC_UNEXPECTED_ERROR("MDS-9004", Level.ERROR,
+            "Unexpected failure while handling a gRPC call; the caller got status INTERNAL"),
     UNDELIVERABLE_ERROR("MDS-9003", Level.ERROR,
             "Background failure after its stream was closed; the failed work was dropped");
 

@@ -234,6 +234,15 @@ range, and the full log lines for that request id or code (including `error.stac
 - **Check:** if the change was meant to apply now, restart the instances one at a time (a rolling
   deploy). If nobody expected it, find out who changed the store.
 
+<a id="mds-1019"></a>
+### MDS-1019: gRPC server listening
+
+- **Level:** INFO. Normal at startup, once per instance, just before [MDS-1001](#mds-1001).
+- **Means:** the `mds.v1.MarketData` gRPC API accepts calls on `mds.port` (`MDS_GRPC_PORT`, 9090 by
+  default).
+- **Check:** a missing line means the gRPC port couldn't be bound (another process on it): the
+  startup error says so.
+
 ## Requests and business outcomes (2xxx)
 
 <a id="mds-2001"></a>
@@ -463,3 +472,13 @@ range, and the full log lines for that request id or code (including `error.stac
   expected and isn't logged under this code.
 - **Check:** whether it repeats. A single line during shutdown or a redeploy can be ignored.
 - **Escalate:** if it repeats, with the full log lines: it points at a code or library problem.
+
+<a id="mds-9004"></a>
+### MDS-9004: Unexpected failure while handling a gRPC call
+
+- **Level:** ERROR.
+- **Means:** a gRPC call failed in a way the service has no rule for. The caller got status
+  `INTERNAL` and the call's `x-request-id` (in the response headers or trailers); `http.request.id`
+  on this line is the same id. `error.*` says what failed.
+- **Check:** `error.type` and `error.message`; find the other lines for the call by its request id.
+- **Escalate:** with the full log lines: it points at a code problem.
