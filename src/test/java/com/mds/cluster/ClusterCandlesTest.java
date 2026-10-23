@@ -155,7 +155,7 @@ class ClusterCandlesTest {
         MdsProperties scale6 = new MdsProperties(properties.exchanges(), properties.pairs(),
                 properties.connectionTimeout(), properties.reconnectDelay(), properties.staleAfter(),
                 properties.archive(), properties.stream(), new MdsProperties.DecimalSettings(6, RoundingMode.HALF_EVEN),
-                properties.ohlc(), properties.socksProxy(), properties.cluster());
+                properties.ohlc(), properties.socksProxy(), properties.cluster(), MdsProperties.Mode.DEVELOPMENT);
         HazelcastInstance third = TestClusters.member(properties.cluster());
         try {
             org.assertj.core.api.Assertions.assertThatThrownBy(() -> new Cluster(third, scale6, new SimpleMeterRegistry()))
@@ -184,7 +184,7 @@ class ClusterCandlesTest {
                         Duration.ofMinutes(30), 10, true, List.of("*"), Duration.ofSeconds(30)),
                 new MdsProperties.DecimalSettings(8, RoundingMode.HALF_EVEN),
                 new MdsProperties.Ohlc(ZoneOffset.UTC, Duration.ofSeconds(10)),
-                new MdsProperties.SocksProxy("", 1080), cluster);
+                new MdsProperties.SocksProxy("", 1080), cluster, MdsProperties.Mode.DEVELOPMENT);
     }
 
     private static Decimal d(String value) {

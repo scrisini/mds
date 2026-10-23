@@ -69,7 +69,11 @@ flowchart LR
 - **InfluxDB** holds the price history and completed candles. The open-source version runs as one
   instance; see [InfluxDB](#influxdb) for a standby in another AZ.
 - **Settings and secrets** are read once at startup, from SSM Parameter Store and Vault, over the
-  private network. Exchange traffic leaves through a NAT gateway, or through the SOCKS5 proxy where
+  private network. Every 5 minutes each instance re-reads them and checks that a restart would
+  still succeed (README "Checking the stored configuration").
+- **Production mode** (`MDS_MODE=production`, set in `deploy/`) refuses to start with settings that
+  are unsafe in production, such as the development InfluxDB token or text logs (README
+  "Production mode"). Exchange traffic leaves through a NAT gateway, or through the SOCKS5 proxy where
   that is required (`MDS_SOCKS_PROXY_HOST`).
 - **Only the ALB is public.** Only `/api/` is routed; `/actuator` (health details, metrics) is
   reachable only inside the VPC.
@@ -87,7 +91,7 @@ carry everything while the third is replaced.
 | Two instances fail at once | As above | Pairs whose candle and backup were both on them reload from InfluxDB, losing at most one flush interval (10 s) |
 | InfluxDB is down | Real-time prices and current candles keep working; history requests get 502 | Completed candles wait in the cluster and are written when it's back ([MDS-3103](runbook.md#mds-3103)); price snapshots taken meanwhile are lost ([MDS-3102](runbook.md#mds-3102)). Don't restart instances until it's back: a new one can't reload its candles ([MDS-3104](runbook.md#mds-3104)) |
 | An exchange is down | Its prices drop out of the aggregate; the others carry on | Its per-exchange candles pause |
-| SSM or Vault is down | None for running instances | New instances refuse to start ([MDS-1013](runbook.md#mds-1013)), so a deploy stalls and rolls back |
+| SSM or Vault is down, or a stored value is bad | None for running instances. Within 5 minutes each reports that a restart would fail ([MDS-1016](runbook.md#mds-1016), `mds.config.restartable` 0), without leaving the load balancer | New instances refuse to start ([MDS-1013](runbook.md#mds-1013)), so a deploy stalls and rolls back. Check first: `POST /actuator/configcheck` |
 
 ## Container images
 
@@ -256,7 +260,8 @@ file://...`) and `deploy/ecs/service.json` (`aws ecs create-service --cli-input-
   container reads the AppRole secret ID from Secrets Manager and writes it to a file that only
   mds can read (`MDS_VAULT_APP_ROLE_SECRET_ID_FILE`). The task execution role needs
   `secretsmanager:GetSecretValue` on that secret. Rotate the secret ID in Secrets Manager; new tasks
-  pick it up.
+  pick it up. Don't limit the secret ID's number of uses: the configuration check logs in every 5
+  minutes, like a start does.
 - **The task role** allows `ssm:GetParametersByPath` on `/mds/prod/*`, and `kms:Decrypt` if you use
   SecureString parameters.
 
@@ -418,11 +423,15 @@ Either way:
   that tag.
 - [ ] `/mds/prod/` parameters in SSM and `mds/prod` secrets in Vault (README "Configuration and
   secrets"); the IAM role and Vault policy allow reading them.
-- [ ] Three instances in three AZs, and `GET /actuator/health` inside the VPC shows `members: 3`.
+- [ ] `MDS_MODE=production` is set, and the instances start (production mode refuses unsafe settings).
+- [ ] Three instances in three AZs, and `GET /actuator/health` inside the VPC shows `members: 3`
+  and `configCheck` `UP`.
 - [ ] ALB: HTTPS only, `/api/` only, idle timeout 120 s, target group health on
   `/actuator/health/readiness`, deregistration delay 30 s.
 - [ ] Port 5701 reachable only from mds (security group or NetworkPolicy).
-- [ ] Alerts: `mds.cluster.members` below 3, unhealthy target count above 0, InfluxDB health, and
+- [ ] Alerts: `mds.cluster.members` below 3, `mds.config.restartable` at 0, unhealthy target count
+  above 0, InfluxDB health, and
   the [runbook's suggested alerts](runbook.md#finding-the-log-lines).
 - [ ] InfluxDB backups (snapshots or Timestream automated backups), and a restore tried once.
 - [ ] A rolling deploy tried with a client connected: it reconnects and keeps receiving prices.
+- [ ] Deploy runbooks start with `POST /actuator/configcheck` on one instance: `"restartable": true`.

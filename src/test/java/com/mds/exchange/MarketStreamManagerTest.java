@@ -54,7 +54,7 @@ class MarketStreamManagerTest {
                         Duration.ofMinutes(30), 2, true, List.of("*"), Duration.ofSeconds(30)),
                 new MdsProperties.DecimalSettings(8, RoundingMode.HALF_EVEN),
                 new MdsProperties.Ohlc(ZoneOffset.UTC, Duration.ofSeconds(10)),
-                new MdsProperties.SocksProxy("", 1080), TestClusters.standalone());
+                new MdsProperties.SocksProxy("", 1080), TestClusters.standalone(), MdsProperties.Mode.DEVELOPMENT);
         manager = new MarketStreamManager(properties, book);
         when(exchange.getStreamingMarketDataService()).thenReturn(marketData);
         when(exchange.disconnect()).thenReturn(Completable.complete());

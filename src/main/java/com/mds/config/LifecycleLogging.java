@@ -14,12 +14,18 @@ import org.springframework.stereotype.Component;
 @Component
 class LifecycleLogging {
 
+    private final MdsProperties properties;
+
+    LifecycleLogging(MdsProperties properties) {
+        this.properties = properties;
+    }
+
     @EventListener
     void started(ApplicationReadyEvent event) {
         ConfigurableEnvironment environment = event.getApplicationContext().getEnvironment();
         logExternalConfiguration(environment);
         Integer port = environment.getProperty("local.server.port", Integer.class);
-        LogEvent.SERVICE_STARTED.at(log).with("port", port).log();
+        LogEvent.SERVICE_STARTED.at(log).with("port", port).with("mode", properties.mode()).log();
     }
 
     /**

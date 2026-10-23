@@ -6,6 +6,8 @@ kind: ConfigMap
 metadata:
   name: mds-env
 data:
+  # Refuses unsafe settings at startup and in the configuration check (README "Production mode")
+  MDS_MODE: production
   MDS_ENVIRONMENT: prod
   MDS_LOG_FORMAT: ecs
   # The headless Service in services.yaml: <service>.<namespace>.svc.cluster.local
@@ -17,5 +19,7 @@ data:
   MDS_VAULT_AUTH: kubernetes
   MDS_VAULT_KUBERNETES_ROLE: mds
   MDS_VAULT_PATH: mds/prod
+  MDS_STREAM_ALLOWED_ORIGINS: https://app.example.com   # CHANGE: sites whose pages open WebSockets
+  MDS_STREAM_ALLOW_UNTHROTTLED: "false"
   # The image's launcher prints a native-memory report to stdout at exit; keep stdout JSON only
   BPL_JAVA_NMT_ENABLED: "false"

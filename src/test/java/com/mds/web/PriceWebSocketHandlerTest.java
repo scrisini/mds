@@ -59,7 +59,7 @@ class PriceWebSocketHandlerTest {
                         Duration.ofMinutes(30), 10, true, List.of("*"), Duration.ofSeconds(30)),
                 new MdsProperties.DecimalSettings(8, RoundingMode.HALF_EVEN),
                 new MdsProperties.Ohlc(ZoneOffset.UTC, Duration.ofSeconds(10)),
-                new MdsProperties.SocksProxy("", 1080), TestClusters.standalone());
+                new MdsProperties.SocksProxy("", 1080), TestClusters.standalone(), MdsProperties.Mode.DEVELOPMENT);
         MarketStreamManager streams = mock(MarketStreamManager.class);
         when(streams.exchangesFor(any())).thenReturn(List.of("kraken"));
         PriceService prices = new PriceService(streams, book, new PriceAggregator(), properties,
