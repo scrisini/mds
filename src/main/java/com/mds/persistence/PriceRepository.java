@@ -116,16 +116,25 @@ public class PriceRepository {
 
     /** The most recent candle of every pair, source and period whose period started since {@code since}. */
     public List<Candle> findLatestCandles(Instant since) {
+        return latestCandles(since, "");
+    }
+
+    /** The most recent candle of each of the pair's sources and periods that started since {@code since}. */
+    public List<Candle> findLatestCandles(MarketPair pair, Instant since) {
+        return latestCandles(since, " and r.pair == \"%s\"".formatted(pair));
+    }
+
+    private List<Candle> latestCandles(Instant since, String pairFilter) {
         String flux = """
                 from(bucket: "%s")
                   |> range(start: %s)
-                  |> filter(fn: (r) => r._measurement == "%s")
+                  |> filter(fn: (r) => r._measurement == "%s"%s)
                   |> pivot(rowKey: ["_time"], columnKey: ["_field"], valueColumn: "_value")
                   |> group(columns: ["pair", "source", "period"])
                   |> sort(columns: ["_time"])
                   |> tail(n: 1)
                   |> group()
-                """.formatted(escape(bucket), since, OHLC);
+                """.formatted(escape(bucket), since, OHLC, pairFilter);
         return records(OHLC, flux).stream().map(PriceRepository::toCandle).toList();
     }
 

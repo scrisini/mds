@@ -17,7 +17,7 @@ import org.slf4j.event.Level;
  * <ul>
  *   <li>{@code 1xxx}: lifecycle (startup, configuration, recovery)</li>
  *   <li>{@code 2xxx}: requests and business outcomes (prices, candles)</li>
- *   <li>{@code 3xxx}: dependencies: {@code 30xx} exchanges, {@code 31xx} InfluxDB</li>
+ *   <li>{@code 3xxx}: dependencies: {@code 30xx} exchanges, {@code 31xx} InfluxDB, {@code 32xx} the cluster</li>
  *   <li>{@code 9xxx}: unexpected failures</li>
  * </ul>
  */
@@ -36,12 +36,24 @@ public enum LogEvent {
     CANDLES_STARTED("MDS-1006", Level.INFO,
             "Building day, week, month and year candles for the index and each exchange"),
     CANDLES_RECOVERED("MDS-1007", Level.INFO,
-            "Reloaded stored candles; ended and missed periods will be completed at the next flush"),
+            "Reloaded a pair's stored candles; ended and missed periods will be completed at the next flush"),
+    CLUSTER_JOINED("MDS-1008", Level.INFO,
+            "Cluster member started; pairs are shared out among the members, each building its own pairs' candles"),
+    CLUSTER_SETTINGS_MISMATCH("MDS-1009", Level.ERROR,
+            "Decimal precision or candle zone differs from the running cluster; this instance refuses to start"),
+    CONFIG_LOADED("MDS-1011", Level.INFO,
+            "Configuration loaded from AWS SSM Parameter Store at startup"),
+    SECRETS_LOADED("MDS-1012", Level.INFO,
+            "Secrets loaded from HashiCorp Vault at startup"),
+    CONFIG_LOAD_FAILED("MDS-1013", Level.ERROR,
+            "Could not load configuration or secrets at startup; this instance refuses to start"),
 
     CANDLES_COMPLETED("MDS-2001", Level.INFO,
             "Candles for ended periods completed and written"),
     QUOTE_VALUE_OUT_OF_RANGE("MDS-2002", Level.WARN,
             "Exchange value exceeds the decimal range and is dropped; logged once per exchange and field"),
+    SUBSCRIBERS_REBALANCED("MDS-2003", Level.INFO,
+            "Closed subscriptions above this instance's fair share; their clients reconnect to less loaded instances"),
 
     EXCHANGE_CONNECTED("MDS-3001", Level.INFO,
             "Connected to an exchange and streaming its pairs"),
@@ -70,6 +82,13 @@ public enum LogEvent {
             "Could not write candles to InfluxDB; retrying at the next flush"),
     CANDLE_RELOAD_FAILED("MDS-3104", Level.ERROR,
             "Could not reload candles from InfluxDB at startup; candle series start fresh"),
+
+    CLUSTER_MEMBER_JOINED("MDS-3201", Level.INFO,
+            "Another instance joined the cluster; some pairs move to it with their candles"),
+    CLUSTER_MEMBER_LEFT("MDS-3202", Level.WARN,
+            "An instance left the cluster; its pairs move to the remaining instances, which continue their candles"),
+    CANDLE_UPDATE_FAILED("MDS-3203", Level.WARN,
+            "Could not update the shared candles; prices are left out of candles until the cluster responds"),
 
     UNEXPECTED_ERROR("MDS-9001", Level.ERROR,
             "Unexpected failure while handling a request; the caller got HTTP 500"),

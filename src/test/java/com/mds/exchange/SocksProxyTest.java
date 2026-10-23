@@ -16,6 +16,7 @@ import java.util.concurrent.TimeUnit;
 import com.mds.config.MdsProperties;
 import com.mds.service.QuoteBook;
 import com.mds.support.FakeSocks5Server;
+import com.mds.support.TestClusters;
 import info.bitrich.xchangestream.core.StreamingExchange;
 import info.bitrich.xchangestream.core.ProductSubscription;
 import org.junit.jupiter.api.Test;
@@ -129,6 +130,6 @@ class SocksProxyTest {
                         Duration.ofMinutes(30), 10, true, List.of("*")),
                 new MdsProperties.DecimalSettings(8, RoundingMode.HALF_EVEN),
                 new MdsProperties.Ohlc(ZoneOffset.UTC, Duration.ofSeconds(10)),
-                proxy);
+                proxy, TestClusters.standalone());
     }
 }

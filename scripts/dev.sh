@@ -9,7 +9,7 @@
 #   scripts/dev.sh test             run the test suite
 #   scripts/dev.sh stop             stop InfluxDB, keeping its data
 #   scripts/dev.sh reset [--yes]    stop InfluxDB and delete all of its data
-#   scripts/dev.sh hooks            install the git hooks in .githooks (commit message checks)
+#   scripts/dev.sh hooks            install the git hooks in .githooks (commit messages, plaintext secrets)
 #
 # Extra arguments to `run` are passed to Spring Boot, e.g.
 #   scripts/dev.sh run --mds.pairs=BTC/USDT --logging.level.com.mds=DEBUG
@@ -17,7 +17,8 @@
 # Environment variables (all optional) are read by the app as usual, see README "Configuration".
 # Setting MDS_INFLUX_URL to anything other than http://localhost:8086 uses that InfluxDB instead
 # of starting the local container. With MDS_SOCKS_PROXY_HOST (and optionally MDS_SOCKS_PROXY_PORT)
-# set, `check` tests the proxy and reaches exchanges through it, as the app will.
+# set, `check` tests the proxy and reaches exchanges through it, as the app will. If
+# config/secrets/local.enc.env exists, `run` decrypts it with SOPS into the app's environment.
 
 set -euo pipefail
 
@@ -30,6 +31,7 @@ INFLUX_URL="${MDS_INFLUX_URL:-$LOCAL_INFLUX_URL}"
 MIN_JAVA=17
 SOCKS_HOST="${MDS_SOCKS_PROXY_HOST:-}"
 SOCKS_PORT="${MDS_SOCKS_PROXY_PORT:-1080}"
+LOCAL_SECRETS="config/secrets/local.enc.env"
 
 if [ -t 1 ]; then
     RED=$'\033[31m'; GREEN=$'\033[32m'; YELLOW=$'\033[33m'; BOLD=$'\033[1m'; RESET=$'\033[0m'
@@ -146,10 +148,22 @@ cmd_check() {
         esac
     done
 
+    if [ -f "$LOCAL_SECRETS" ]; then
+        if ! command -v sops >/dev/null 2>&1; then
+            fail "$LOCAL_SECRETS exists but sops is not installed ('brew install sops age')"
+            missing=1
+        elif sops -d "$LOCAL_SECRETS" >/dev/null 2>&1; then
+            ok "SOPS decrypts $LOCAL_SECRETS (run passes it to the app's environment)"
+        else
+            fail "sops cannot decrypt $LOCAL_SECRETS: is your age key in ~/.config/sops/age/keys.txt (or SOPS_AGE_KEY_FILE) and listed in .sops.yaml?"
+            missing=1
+        fi
+    fi
+
     if [ "$(git config --get core.hooksPath || true)" = ".githooks" ]; then
-        ok "git commit-message hook installed"
+        ok "git hooks installed (commit messages, plaintext secrets)"
     else
-        warn "git commit-message hook not installed; run 'scripts/dev.sh hooks'"
+        warn "git hooks not installed; run 'scripts/dev.sh hooks'"
     fi
 
     if [ "$missing" -ne 0 ]; then
@@ -184,10 +198,16 @@ cmd_run() {
     cmd_check
     cmd_infra
     step "Starting mds on http://localhost:$APP_PORT (Ctrl-C to stop)"
+    local app=(./gradlew bootRun --console=plain)
     if [ "$#" -gt 0 ]; then
-        exec ./gradlew bootRun --console=plain --args="$*"
+        app+=("--args=$*")
     fi
-    exec ./gradlew bootRun --console=plain
+    if [ -f "$LOCAL_SECRETS" ]; then
+        ok "secrets from $LOCAL_SECRETS (SOPS), in the app's environment only"
+        # sops runs the command through a shell; quote each word so arguments survive intact
+        exec sops exec-env "$LOCAL_SECRETS" "$(printf '%q ' "${app[@]}")"
+    fi
+    exec "${app[@]}"
 }
 
 cmd_status() {
@@ -231,6 +251,7 @@ cmd_hooks() {
     chmod +x .githooks/*
     git config core.hooksPath .githooks
     ok "commit messages are now checked against .commitlintrc.json on every commit"
+    ok "staged files are checked for plaintext secrets (scripts/check-secrets.sh)"
 }
 
 cmd_test() {

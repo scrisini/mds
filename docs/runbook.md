@@ -34,10 +34,14 @@ Suggested alerts:
 - `MDS-3006` or `MDS-3008` for the same `mds.exchange` repeating for more than 10 minutes (an
   exchange is unreachable or rejecting the connection);
 - `MDS-3103` repeating for more than 10 minutes (candles aren't being saved);
-- a deployment without one `MDS-1001` per instance.
+- a deployment without one `MDS-1001` per instance;
+- `MDS-3202` that isn't followed by an `MDS-3201` within 10 minutes (the cluster lost an instance
+  and runs without its spare capacity);
+- the `mds.cluster.members` gauge below the number of instances deployed (instances that didn't
+  join split the candles).
 
-Useful health checks: `GET /actuator/health` (InfluxDB), `GET /api/v1/exchanges` (each exchange's
-connection state and last update).
+Useful health checks: `GET /actuator/health` (InfluxDB and the cluster), `GET /api/v1/exchanges`
+(each exchange's connection state and last update).
 
 ## When to escalate to developers
 
@@ -102,14 +106,74 @@ range, and the full log lines for that request id or code (including `error.stac
   boundaries for new candles only.
 
 <a id="mds-1007"></a>
-### MDS-1007: Reloaded stored candles
+### MDS-1007: Reloaded a pair's stored candles
 
-- **Level:** INFO. Normal at startup.
-- **Means:** `mds.series` candle series were reloaded from InfluxDB and continue where they
-  stopped. `mds.backfill_count` candles for periods that ended (or were missed while the service
-  was down) are completed at the next flush, filled at the last close.
+- **Level:** INFO. Normal once per pair when the cluster starts. Also when the cluster lost a pair's
+  in-progress candles, after a split or after two members failed together; then look for
+  [MDS-3202](#mds-3202) just before.
+- **Means:** the member owning `mds.pair` reloaded `mds.series` candle series from InfluxDB. They
+  continue where they were last written, at most `mds.ohlc.flush-interval` ago.
+  `mds.backfill_count` candles for periods that ended meanwhile are completed at the next flush,
+  filled at the last close.
 - **Check:** after a long outage, a large `mds.backfill_count` is expected. `mds.series` of 0 on a
   service that has run before means no candles were found: check `MDS_INFLUX_BUCKET`.
+
+<a id="mds-1008"></a>
+### MDS-1008: Cluster member started
+
+- **Level:** INFO. Normal at every startup.
+- **Means:** this instance is a member of the Hazelcast cluster `mds.cluster`, which now has
+  `mds.members` members; it listens at `mds.address`. Each pair is owned by one member, which builds
+  its candles and archives its prices. Every member streams all exchanges and serves its own
+  subscribers.
+- **Check:** `mds.members` should equal the number of instances you run against this InfluxDB
+  bucket. If it's 1 while others run, they didn't join: check `MDS_CLUSTER_MEMBERS` (or
+  `MDS_CLUSTER_KUBERNETES_SERVICE_DNS`), `MDS_CLUSTER_NAME` and that the cluster port is open
+  between the instances. Separate clusters on one bucket overwrite each other's candles.
+
+<a id="mds-1009"></a>
+### MDS-1009: Settings differ from the running cluster
+
+- **Level:** ERROR. The instance stops during startup.
+- **Means:** `mds.local` (this instance's decimal precision and candle zone) differs from
+  `mds.cluster_settings`, recorded by the cluster's first member. Shared candles store prices at
+  that precision, with periods starting in that zone, so members must agree.
+- **Check:** if the change is a mistake, deploy with the cluster's values. To change them
+  deliberately, stop **every** instance, then start them all with the new values.
+
+<a id="mds-1011"></a>
+### MDS-1011: Configuration loaded from AWS SSM Parameter Store
+
+- **Level:** INFO. Normal at startup when `MDS_SSM_PATH` is set.
+- **Means:** `mds.keys` parameters under `mds.path` were read and override `application.yml`.
+  Environment variables and command-line arguments still override them.
+- **Check:** `mds.keys` should match the parameters you expect for this environment. 0 means the
+  path is empty or wrong (it is case-sensitive, e.g. `/mds/prod/`).
+
+<a id="mds-1012"></a>
+### MDS-1012: Secrets loaded from HashiCorp Vault
+
+- **Level:** INFO. Normal at startup when `MDS_VAULT_ADDRESS` is set.
+- **Means:** the secret `mds.path` was read, with `mds.keys` keys; its values override Parameter
+  Store and `application.yml`. A token from a Kubernetes or AppRole login was revoked again after
+  reading. Values are never logged.
+- **Check:** `mds.keys` should match the keys you stored. If a key is missing, the setting falls back
+  to the environment or `application.yml`.
+
+<a id="mds-1013"></a>
+### MDS-1013: Could not load configuration or secrets
+
+- **Level:** ERROR. The instance stops during startup, before logging is set up, so this appears in
+  the startup error (`Application run failed`) in plain text rather than as a JSON line.
+- **Means:** `MDS_SSM_PATH` or `MDS_VAULT_ADDRESS` is set, but reading failed. The message names the
+  store, the path and the reason, for example `HTTP 403: permission denied`, an unknown host or a
+  timeout; never a token or secret value. The instance doesn't fall back to defaults.
+- **Check:**
+  - **Parameter Store:** the instance's IAM role allows `ssm:GetParametersByPath` on the path (and
+    `kms:Decrypt` for SecureString), and the SSM VPC endpoint is reachable.
+  - **Vault:** `MDS_VAULT_ADDRESS` is reachable and its certificate trusted (`MDS_VAULT_CA_CERT`); the
+    login works (`MDS_VAULT_AUTH` and its role, token or secret id); the policy allows `read` on
+    `<kv-mount>/data/<path>`.
 
 ## Requests and business outcomes (2xxx)
 
@@ -130,6 +194,19 @@ range, and the full log lines for that request id or code (including `error.stac
   exchanges are unaffected. This usually concerns volumes of low-priced pairs.
 - **Check:** if the field matters (for example `last`), lower `MDS_DECIMAL_SCALE` and restart.
   Otherwise no action.
+
+<a id="mds-2003"></a>
+### MDS-2003: Subscribers moved to less loaded instances
+
+- **Level:** INFO. Expected after scaling out, or after a restart drew reconnecting clients to the
+  same instance.
+- **Means:** this instance had `mds.local` subscriptions against a fair share of `mds.fair_share`
+  (`mds.total` across `mds.members` instances), so it closed `mds.closed` of its newest ones. SSE
+  clients reconnect by themselves; WebSocket clients got close code 1013 and should reconnect. The
+  load balancer sends them to an instance with fewer.
+- **Check:** if it repeats every interval on the same instance, the load balancer isn't spreading
+  connections: use least-connections balancing, or raise `mds.cluster.rebalance.tolerance`. To stop
+  moving clients, set `MDS_CLUSTER_REBALANCE_ENABLED=false`.
 
 ## Dependencies (3xxx)
 
@@ -250,13 +327,51 @@ range, and the full log lines for that request id or code (including `error.stac
 ### MDS-3104: Could not reload candles at startup
 
 - **Level:** ERROR.
-- **Means:** InfluxDB was unavailable when the instance started, so candle series start from the
-  next price instead of continuing. The stored candles for the current periods will be
-  overwritten with ones that only cover the time since startup, and missed periods won't be
-  back-filled.
+- **Means:** InfluxDB was unavailable when a member had to reload candles (`mds.pair`, or every
+  pair when starting the cluster), so those series start from the next price instead of
+  continuing. The stored candles for the current periods will be overwritten with ones that only
+  cover the time since then, and missed periods won't be back-filled.
 - **Check:** restore InfluxDB, then restart the instance as soon as possible: it then reloads and
   continues the stored series ([MDS-1007](#mds-1007)). The longer it runs, the more of the current
   periods' data is lost.
+
+### Cluster (32xx)
+
+<a id="mds-3201"></a>
+### MDS-3201: Another instance joined the cluster
+
+- **Level:** INFO. Normal when scaling out or during a rolling deploy.
+- **Means:** `mds.member` joined; the cluster has `mds.members` members. Some pairs move to it,
+  with their in-progress candles, and their candles and archiving continue there.
+- **Check:** no action. If instances join and leave repeatedly, look for restarts or network
+  problems between them.
+
+<a id="mds-3202"></a>
+### MDS-3202: An instance left the cluster
+
+- **Level:** WARN. Expected during a deploy or scale-in; otherwise an instance crashed or lost its
+  network.
+- **Means:** `mds.member` left; `mds.members` remain. Its pairs move to the members that held their
+  backups, which continue the in-progress candles, so none are lost. If the backups went too (two
+  members failed at once, or the cluster split), the new owner reloads the pair from InfluxDB
+  ([MDS-1007](#mds-1007)), losing at most one flush interval. Its subscribers were
+  disconnected and reconnect to the remaining instances. Prices that arrived during the move, a
+  second or two, may be missing from the candles' high and low.
+- **Check:** if it wasn't a planned stop, find out why the instance went (crash, OOM, node
+  failure) and restart it. If `mds.members` is lower than the instances still running, the cluster
+  has split: each part writes the same candles until Hazelcast merges them, within a minute. If it
+  doesn't, check the cluster port between the instances. With one member left, another failure
+  loses the in-progress candles since the last flush (`mds.ohlc.flush-interval`).
+
+<a id="mds-3203"></a>
+### MDS-3203: Could not update the shared candles
+
+- **Level:** WARN. Logged once when updates start failing, again after they recover and fail anew.
+- **Means:** applying a price for `mds.pair` to the cluster's candles failed (`mds.reason`), usually
+  while a member is leaving and its pairs are moving. Prices are left out of the candles until
+  updates succeed again; nothing else is affected.
+- **Check:** if it doesn't clear within a minute, look for [MDS-3202](#mds-3202) and check the
+  cluster port between the instances and `GET /actuator/health`.
 
 ## Unexpected failures (9xxx)
 

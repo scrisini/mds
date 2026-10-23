@@ -41,7 +41,8 @@ import tools.jackson.databind.json.JsonMapper;
  *
  * Subscribing to a pair again replaces its rate. {@code seq} counts price messages per pair.
  * A client that stops reading is disconnected (close code 1008) once its send buffer is full,
- * rather than holding memory on the server.
+ * rather than holding memory on the server. In a cluster, an instance with more than its share of
+ * subscribers closes some sockets with code 1013 (try again later): reconnect and subscribe again.
  */
 @Slf4j
 @Component
@@ -106,7 +107,8 @@ public class PriceWebSocketHandler extends TextWebSocketHandler {
         AtomicLong sequence = new AtomicLong();
         StreamSubscription subscription = streams.open(pair, rate, PriceStreamService.WEBSOCKET,
                 price -> send(session, new PriceMessage("price", pair.symbol(), sequence.incrementAndGet(), price)),
-                error -> closeQuietly(session, error));
+                error -> closeQuietly(session, error),
+                () -> reconnectElsewhere(session));
         open.put(pair, subscription);
         send(session, new SubscribedMessage("subscribed", pair.symbol(), rate.toString()));
     }
@@ -167,6 +169,15 @@ public class PriceWebSocketHandler extends TextWebSocketHandler {
         log.debug("Closing WebSocket {}: {}", session.getId(), cause.getMessage());
         try {
             session.close(CloseStatus.POLICY_VIOLATION.withReason("send failed or client too slow"));
+        } catch (IOException e) {
+            // already gone
+        }
+    }
+
+    /** Closes with 1013 (try again later) so the client reconnects, through the load balancer, elsewhere. */
+    private void reconnectElsewhere(WebSocketSession session) {
+        try {
+            session.close(CloseStatus.SERVICE_OVERLOAD.withReason("rebalancing; reconnect"));
         } catch (IOException e) {
             // already gone
         }

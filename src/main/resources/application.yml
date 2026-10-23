@@ -1,6 +1,14 @@
 spring:
   application:
     name: mds
+  config:
+    # Configuration from AWS SSM Parameter Store, then secrets from Vault, read once at startup. Each
+    # does nothing until mds.ssm.path / mds.vault.address is set below ("optional" covers only that:
+    # a configured store that can't be read stops startup). See README "Configuration and secrets";
+    # precedence: command line > environment > Vault > Parameter Store > this file.
+    import:
+      - "optional:mds-ssm:"
+      - "optional:mds-vault:"
   threads:
     virtual:
       enabled: true
@@ -34,6 +42,44 @@ mds:
   socks-proxy:
     host: ${MDS_SOCKS_PROXY_HOST:}
     port: ${MDS_SOCKS_PROXY_PORT:1080}
+  # AWS SSM Parameter Store: /mds/prod/mds/pairs (or /mds/prod/mds.pairs) sets mds.pairs. Blank path = off.
+  # Credentials and region from the AWS SDK default chain; reached directly (VPC endpoint), not proxied.
+  ssm:
+    path: ${MDS_SSM_PATH:}
+    region: ${MDS_SSM_REGION:}
+    endpoint: ${MDS_SSM_ENDPOINT:}
+  # HashiCorp Vault key/value secret whose keys are property names, e.g. mds.influx.token. Blank
+  # address = off; https only (http for localhost). Reached directly on the private network.
+  vault:
+    address: ${MDS_VAULT_ADDRESS:}
+    kv-mount: ${MDS_VAULT_KV_MOUNT:secret}
+    path: ${MDS_VAULT_PATH:mds}
+    kv-version: 2
+    namespace: ${MDS_VAULT_NAMESPACE:}
+    ca-cert: ${MDS_VAULT_CA_CERT:}
+    # token | kubernetes | app-role
+    auth: ${MDS_VAULT_AUTH:token}
+    token: ${MDS_VAULT_TOKEN:}
+    kubernetes:
+      role: ${MDS_VAULT_KUBERNETES_ROLE:}
+    app-role:
+      role-id: ${MDS_VAULT_APP_ROLE_ID:}
+      secret-id-file: ${MDS_VAULT_APP_ROLE_SECRET_ID_FILE:}
+  # Embedded Hazelcast cluster: every instance sharing an InfluxDB bucket must join the same one.
+  # No members and no Kubernetes service = a cluster of one. Cluster traffic is not proxied, encrypted
+  # or authenticated: only other mds instances may reach the port.
+  cluster:
+    name: ${MDS_CLUSTER_NAME:mds}
+    port: ${MDS_CLUSTER_PORT:5701}
+    # host or host:port of other instances, comma-separated, e.g. 10.0.0.2,10.0.0.3:5701
+    members: ${MDS_CLUSTER_MEMBERS:}
+    # headless Service listing the pods, e.g. mds-hz.prod.svc.cluster.local
+    kubernetes-service-dns: ${MDS_CLUSTER_KUBERNETES_SERVICE_DNS:}
+    rebalance:
+      enabled: ${MDS_CLUSTER_REBALANCE_ENABLED:true}
+      interval: 10s
+      tolerance: 0.2
+      max-per-round: 20
   # Precision of every price and volume; fixed at startup. Range is ±Long.MAX_VALUE / 10^scale.
   decimal:
     scale: ${MDS_DECIMAL_SCALE:8}
@@ -67,6 +113,9 @@ logging:
     # XChange logs every HTTP call and WebSocket (re)subscription at INFO
     si.mazi.rescu: WARN
     info.bitrich.xchangestream: WARN
+    # Hazelcast logs its banner, partition tables and every connection at INFO; membership
+    # changes are logged as coded events (MDS-32xx)
+    com.hazelcast: WARN
   structured:
     format:
       # ecs in production: one Elastic Common Schema JSON object per line (ELK, Splunk, New Relic).
