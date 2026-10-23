@@ -22,6 +22,7 @@ import com.mds.service.PriceAggregator;
 import com.mds.service.PriceService;
 import com.mds.service.PriceStreamService;
 import com.mds.service.QuoteBook;
+import com.mds.support.TestClusters;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import io.reactivex.rxjava3.schedulers.Schedulers;
 import io.reactivex.rxjava3.schedulers.TestScheduler;
@@ -43,6 +44,7 @@ class PriceWebSocketHandlerTest {
     private final JsonMapper json = JsonMapper.builder().build();
     private final WebSocketSession session = mock(WebSocketSession.class);
     private PriceWebSocketHandler handler;
+    private PriceStreamService streamService;
 
     @BeforeEach
     void setUp() throws Exception {
@@ -53,12 +55,12 @@ class PriceWebSocketHandlerTest {
                         Duration.ofMinutes(30), 10, true, List.of("*")),
                 new MdsProperties.DecimalSettings(8, RoundingMode.HALF_EVEN),
                 new MdsProperties.Ohlc(ZoneOffset.UTC, Duration.ofSeconds(10)),
-                new MdsProperties.SocksProxy("", 1080));
+                new MdsProperties.SocksProxy("", 1080), TestClusters.standalone());
         MarketStreamManager streams = mock(MarketStreamManager.class);
         when(streams.exchangesFor(any())).thenReturn(List.of("kraken"));
         PriceService prices = new PriceService(streams, book, new PriceAggregator(), properties,
                 Clock.fixed(Instant.parse("2026-10-21T12:00:00Z"), ZoneOffset.UTC));
-        PriceStreamService streamService = new PriceStreamService(book, prices, properties, new SimpleMeterRegistry(),
+        streamService = new PriceStreamService(book, prices, properties, new SimpleMeterRegistry(),
                 new TestScheduler(), Schedulers.trampoline());
         handler = new PriceWebSocketHandler(streamService, json);
         when(session.getId()).thenReturn("s1");
@@ -83,6 +85,17 @@ class PriceWebSocketHandlerTest {
         assertThat(last.get("seq").asLong()).isEqualTo(2);
         assertThat(last.get("data").get("mean").asString()).isEqualTo("101");
         assertThat(last.get("data").get("pair").asString()).isEqualTo("BTC/USDT");
+    }
+
+    @Test
+    void aShedSubscriptionClosesTheSocketWithTryAgainLater() throws Exception {
+        send("{\"action\":\"subscribe\",\"pair\":\"BTC-USDT\",\"rate\":1}");
+
+        assertThat(streamService.shed(1)).isEqualTo(1);
+
+        ArgumentCaptor<CloseStatus> status = ArgumentCaptor.forClass(CloseStatus.class);
+        verify(session).close(status.capture());
+        assertThat(status.getValue().getCode()).isEqualTo(1013);
     }
 
     @Test

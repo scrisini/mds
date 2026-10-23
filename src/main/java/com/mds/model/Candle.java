@@ -1,6 +1,8 @@
 package com.mds.model;
 
 import java.time.Instant;
+import java.time.ZoneId;
+import java.util.function.Consumer;
 
 import com.mds.math.Decimal;
 
@@ -41,6 +43,35 @@ public record Candle(
     /** A flat placeholder for the period starting at {@code nextStart}, priced at this close. */
     public Candle carriedForward(Instant nextStart) {
         return new Candle(pair, source, period, nextStart, close, close, close, close, 0, false);
+    }
+
+    /**
+     * Completes this candle and every following period that has ended by {@code now}, passing each
+     * completed candle to {@code completed} and filling every skipped period with a flat candle at the
+     * last close. Returns the candle for the period containing {@code now}, or null once the series
+     * ends because its source is no longer {@code active}.
+     */
+    public Candle rolledForward(Instant now, ZoneId zone, boolean active, Consumer<Candle> completed) {
+        Candle current = this;
+        Instant end = period.end(current.start, zone);
+        while (!now.isBefore(end)) {
+            completed.accept(current.completed());
+            if (!active) {
+                return null;
+            }
+            current = current.carriedForward(end);
+            end = period.end(end, zone);
+        }
+        return current;
+    }
+
+    /**
+     * Folds a price received at {@code at} into this series: rolls forward to the period containing
+     * {@code at} first. A price stamped before the current period (clock skew) is ignored.
+     */
+    public Candle withPrice(Decimal price, Instant at, ZoneId zone, Consumer<Candle> completed) {
+        Candle rolled = rolledForward(at, zone, true, completed);
+        return at.isBefore(rolled.start) ? rolled : rolled.with(price);
     }
 
     public Candle completed() {

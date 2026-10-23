@@ -37,6 +37,9 @@ dependencies {
     // Persistence
     implementation("com.influxdb:influxdb-client-java:$influxClientVersion")
 
+    // Cluster: shared candle state and subscriber balancing (version from the Spring Boot BOM)
+    implementation("com.hazelcast:hazelcast")
+
     compileOnly("org.projectlombok:lombok")
     annotationProcessor("org.projectlombok:lombok")
     annotationProcessor("org.springframework.boot:spring-boot-configuration-processor")

@@ -19,6 +19,7 @@ import com.mds.config.MdsProperties;
 import com.mds.math.Decimal;
 import com.mds.model.MarketPair;
 import com.mds.service.QuoteBook;
+import com.mds.support.TestClusters;
 import info.bitrich.xchangestream.core.ProductSubscription;
 import info.bitrich.xchangestream.core.StreamingExchange;
 import info.bitrich.xchangestream.core.StreamingMarketDataService;
@@ -53,7 +54,7 @@ class MarketStreamManagerTest {
                         Duration.ofMinutes(30), 2, true, List.of("*")),
                 new MdsProperties.DecimalSettings(8, RoundingMode.HALF_EVEN),
                 new MdsProperties.Ohlc(ZoneOffset.UTC, Duration.ofSeconds(10)),
-                new MdsProperties.SocksProxy("", 1080));
+                new MdsProperties.SocksProxy("", 1080), TestClusters.standalone());
         manager = new MarketStreamManager(properties, book);
         when(exchange.getStreamingMarketDataService()).thenReturn(marketData);
         when(exchange.disconnect()).thenReturn(Completable.complete());

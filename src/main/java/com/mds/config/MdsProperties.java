@@ -21,6 +21,7 @@ import org.springframework.boot.context.properties.bind.DefaultValue;
  * @param decimal           precision of all prices and volumes
  * @param ohlc              OHLC candle settings
  * @param socksProxy        SOCKS5 proxy for all outgoing exchange traffic
+ * @param cluster           Hazelcast cluster that shares candles and balances subscribers across instances
  */
 @ConfigurationProperties("mds")
 public record MdsProperties(
@@ -33,7 +34,8 @@ public record MdsProperties(
         @DefaultValue Stream stream,
         @DefaultValue DecimalSettings decimal,
         @DefaultValue Ohlc ohlc,
-        @DefaultValue SocksProxy socksProxy) {
+        @DefaultValue SocksProxy socksProxy,
+        @DefaultValue Cluster cluster) {
 
     /**
      * @param enabled  whether snapshots of the live quotes are written to InfluxDB
@@ -111,6 +113,77 @@ public record MdsProperties(
         @Override
         public String toString() {
             return enabled() ? host + ":" + port : "none";
+        }
+    }
+
+    /**
+     * The embedded Hazelcast cluster that every instance sharing an InfluxDB bucket must join. With no
+     * {@code members} and no {@code kubernetesServiceDns} the instance is a cluster of one. Cluster
+     * traffic is internal, like InfluxDB, and isn't proxied; it isn't encrypted or authenticated
+     * either, so the port must only be reachable by other mds instances.
+     *
+     * @param name                 cluster name; instances join only a cluster with the same name
+     * @param port                 first port to listen on; the next free one is used if it's taken
+     * @param members              instances to join, {@code host} or {@code host:port}; without a port,
+     *                             {@code port} and the next two are tried
+     * @param kubernetesServiceDns headless Service whose DNS records list the instances, e.g.
+     *                             {@code mds-hz.prod.svc.cluster.local}; blank when not on Kubernetes
+     * @param rebalance            moving real-time subscribers off instances with more than their share
+     */
+    public record Cluster(
+            @DefaultValue("mds") String name,
+            @DefaultValue("5701") int port,
+            @DefaultValue List<String> members,
+            @DefaultValue("") String kubernetesServiceDns,
+            @DefaultValue Rebalance rebalance) {
+
+        public Cluster {
+            if (name == null || name.isBlank()) {
+                throw new IllegalArgumentException("mds.cluster.name must not be blank");
+            }
+            if (port < 1 || port > 65535) {
+                throw new IllegalArgumentException("mds.cluster.port must be between 1 and 65535, was " + port);
+            }
+            members = members == null ? List.of() : members.stream().map(String::trim).filter(m -> !m.isEmpty())
+                    .toList();
+            kubernetesServiceDns = kubernetesServiceDns == null ? "" : kubernetesServiceDns.trim();
+            if (!members.isEmpty() && !kubernetesServiceDns.isEmpty()) {
+                throw new IllegalArgumentException(
+                        "set mds.cluster.members or mds.cluster.kubernetes-service-dns, not both");
+            }
+        }
+
+        /** A cluster of one: nothing to join. */
+        public boolean standalone() {
+            return members.isEmpty() && kubernetesServiceDns.isEmpty();
+        }
+    }
+
+    /**
+     * Every {@code interval}, an instance whose subscriptions exceed the cluster's fair share
+     * ({@code total / instances}) by more than {@code tolerance} closes its newest ones, down to the fair
+     * share and at most {@code maxPerRound} at a time, so the clients reconnect through the load balancer
+     * to an instance with fewer. SSE clients reconnect by themselves; WebSocket clients get close code
+     * 1013 (try again later) and must reconnect.
+     *
+     * @param enabled     whether instances shed subscribers when they have more than their share
+     * @param interval    how often each instance publishes its load and checks it
+     * @param tolerance   how far above the fair share an instance may go before shedding, e.g. 0.2 = 20%
+     * @param maxPerRound most subscriptions one instance closes per interval
+     */
+    public record Rebalance(
+            @DefaultValue("true") boolean enabled,
+            @DefaultValue("10s") Duration interval,
+            @DefaultValue("0.2") double tolerance,
+            @DefaultValue("20") int maxPerRound) {
+
+        public Rebalance {
+            if (tolerance < 0) {
+                throw new IllegalArgumentException("mds.cluster.rebalance.tolerance must not be negative");
+            }
+            if (maxPerRound < 1) {
+                throw new IllegalArgumentException("mds.cluster.rebalance.max-per-round must be at least 1");
+            }
         }
     }
 }
