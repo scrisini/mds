@@ -22,6 +22,7 @@ cluster that shares the candles and balances real-time subscribers.
 ./gradlew compileJava          # fast compile check
 scripts/dev.sh check           # verify local prerequisites (Java, Docker, ports, exchange reachability)
 scripts/dev.sh run [args...]   # start InfluxDB, then the app on :8080; args go to Spring Boot
+scripts/dev.sh docker [--build] # InfluxDB and mds both in Docker (network mds, config/docker.env)
 scripts/dev.sh status          # InfluxDB and app health
 scripts/dev.sh hooks           # install the commit-msg hook (do this once per clone)
 scripts/test-commit-msg.sh     # test the hook after changing it or .commitlintrc.json

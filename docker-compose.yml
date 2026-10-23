@@ -1,3 +1,11 @@
+# Local development only: README "Running locally", and "In Docker" for running mds here.
+# Production runs on ECS or EKS (docs/deployment.md).
+#
+#   docker compose up -d                  InfluxDB only; run mds from the IDE or scripts/dev.sh run
+#   docker compose --profile app up -d    InfluxDB and mds in containers (scripts/dev.sh docker)
+#
+# The mds image is the one production uses, built with buildpacks:
+#   ./gradlew bootBuildImage --imageName=mds:local
 services:
   influxdb:
     image: influxdb:2.7
@@ -14,6 +22,41 @@ services:
     volumes:
       - influxdb-data:/var/lib/influxdb2
       - influxdb-config:/etc/influxdb2
+    networks:
+      - mds
+    healthcheck:
+      test: ["CMD", "influx", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+
+  mds:
+    profiles: ["app"]
+    image: ${MDS_IMAGE:-mds:local}
+    pull_policy: never   # built locally, see above
+    depends_on:
+      influxdb:
+        condition: service_healthy
+    # InfluxDB connection and other mds settings for this network
+    env_file: config/docker.env
+    environment:
+      # Runtime settings of the buildpack image, as in deploy/ (docs/deployment.md "Container images")
+      BPL_JAVA_NMT_ENABLED: "false"
+      JAVA_TOOL_OPTIONS: -XX:MaxDirectMemorySize=192m
+    # The heap is sized from this limit (about the limit minus 650 MiB); below 1 GiB mds doesn't start
+    mem_limit: 1536m
+    # Spring waits up to 30s per shutdown phase (spring.lifecycle.timeout-per-shutdown-phase)
+    stop_grace_period: 60s
+    ports:
+      - "${MDS_HTTP_PORT:-8080}:8080"   # REST, SSE, WebSocket, actuator
+      - "${MDS_GRPC_HOST_PORT:-9090}:9090"   # gRPC
+    networks:
+      - mds
+
+networks:
+  # InfluxDB and mds reach each other by service name (http://influxdb:8086)
+  mds:
+    name: mds
 
 volumes:
   influxdb-data:
