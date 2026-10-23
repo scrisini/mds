@@ -1,5 +1,6 @@
 package com.mds.web;
 
+import java.time.Clock;
 import java.time.Instant;
 import java.util.List;
 import java.util.Optional;
@@ -34,13 +35,15 @@ public class CandleController {
     private final PriceRepository repository;
     private final PriceService priceService;
     private final MarketStreamManager streams;
+    private final Clock clock;
 
     public CandleController(CandleService candles, PriceRepository repository, PriceService priceService,
-                            MarketStreamManager streams) {
+                            MarketStreamManager streams, Clock clock) {
         this.candles = candles;
         this.repository = repository;
         this.priceService = priceService;
         this.streams = streams;
+        this.clock = clock;
     }
 
     /**
@@ -62,7 +65,7 @@ public class CandleController {
         if (limit < 1 || limit > MAX_LIMIT) {
             throw new IllegalArgumentException("limit must be between 1 and " + MAX_LIMIT);
         }
-        Instant end = to.orElseGet(Instant::now);
+        Instant end = to.orElseGet(clock::instant);
         Instant start = from.orElseGet(() -> defaultFrom(candlePeriod, end));
         if (!start.isBefore(end)) {
             throw new IllegalArgumentException("'from' must be before 'to'");

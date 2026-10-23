@@ -74,8 +74,8 @@ com.mds
   once per JVM, so don't create non-zero `Decimal`s in static initialisers or bean constructors.
 - **Configuration:** add settings as fields on the `MdsProperties` records with `@DefaultValue`,
   then document them in `application.yml` and the README configuration table.
-- **Time:** inject `java.time.Clock` (a bean); never call `Instant.now()` in services, so tests can
-  control time (`com.mds.support.MutableClock`).
+- **Time:** inject `java.time.Clock` (a bean); never call `Instant.now()` in services or
+  controllers, so tests can control time (`com.mds.support.MutableClock`).
 - **InfluxDB:** all access goes through `PriceRepository`. Any value interpolated into Flux must be
   validated (`MarketPair` codes, regex-checked ids, enums, `Instant`s); never pass raw user input.
 - **Errors:** throw domain exceptions from services and map them in `ApiExceptionHandler`, which
