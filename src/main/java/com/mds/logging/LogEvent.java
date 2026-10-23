@@ -1,5 +1,7 @@
 package com.mds.logging;
 
+import java.util.Locale;
+
 import org.slf4j.Logger;
 import org.slf4j.event.Level;
 
@@ -79,11 +81,16 @@ public enum LogEvent {
     private final String code;
     private final Level level;
     private final String summary;
+    // built once: every log line of this event uses them
+    private final String message;
+    private final String reference;
 
     LogEvent(String code, Level level, String summary) {
         this.code = code;
         this.level = level;
         this.summary = summary;
+        this.message = "[" + code + "] " + summary;
+        this.reference = "docs/runbook.md#" + code.toLowerCase(Locale.ROOT);
     }
 
     public String code() {
@@ -98,9 +105,14 @@ public enum LogEvent {
         return summary;
     }
 
+    /** The log message: {@code [CODE] summary}. */
+    public String message() {
+        return message;
+    }
+
     /** Link to this event's SOP: the anchor with its code in the runbook. */
     public String reference() {
-        return "docs/runbook.md#" + code.toLowerCase();
+        return reference;
     }
 
     /** Starts a log line for this event: {@code LogEvent.X.at(log).with("exchange", id).cause(e).log()}. */

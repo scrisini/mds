@@ -1,9 +1,8 @@
 package com.mds.service;
 
 import java.time.Instant;
-import java.util.Comparator;
+import java.util.Arrays;
 import java.util.List;
-import java.util.Objects;
 import java.util.Optional;
 import java.util.function.Function;
 
@@ -17,52 +16,68 @@ import org.springframework.stereotype.Component;
 /**
  * Pure statistics over a set of quotes for one pair; no I/O. Results are rounded to the
  * configured {@link Decimal} scale.
+ *
+ * <p>This runs for every real-time subscriber on every price change, so it uses plain loops over
+ * a sorted array rather than streams, comparators and optionals: the same result with a handful
+ * of allocations per call.
  */
 @Component
 public class PriceAggregator {
 
-    public AggregatedPrice aggregate(MarketPair pair, List<PriceQuote> quotes, List<QuoteFailure> failures,
-                                     Instant timestamp) {
-        List<Decimal> lasts = quotes.stream()
-                .map(PriceQuote::last)
-                .filter(Objects::nonNull)
-                .sorted()
-                .toList();
-        if (lasts.isEmpty()) {
-            throw new PriceUnavailableException(pair, failures);
+    /** Statistics over the quotes; empty when none has a last price. */
+    public Optional<AggregatedPrice> aggregate(MarketPair pair, List<PriceQuote> quotes, List<QuoteFailure> failures,
+                                               Instant timestamp) {
+        Decimal[] lasts = sortedLastPrices(quotes);
+        if (lasts.length == 0) {
+            return Optional.empty();
         }
+        PriceQuote bestBid = best(quotes, PriceQuote::bid, true);
+        PriceQuote bestAsk = best(quotes, PriceQuote::ask, false);
 
-        Optional<PriceQuote> bestBid = best(quotes, PriceQuote::bid, Comparator.reverseOrder());
-        Optional<PriceQuote> bestAsk = best(quotes, PriceQuote::ask, Comparator.naturalOrder());
-
-        return new AggregatedPrice(
+        return Optional.of(new AggregatedPrice(
                 pair.toString(),
                 timestamp,
-                lasts.size(),
+                lasts.length,
                 mean(lasts),
                 median(lasts),
                 vwap(quotes),
-                lasts.getFirst(),
-                lasts.getLast(),
-                bestBid.map(PriceQuote::bid).orElse(null),
-                bestBid.map(PriceQuote::exchange).orElse(null),
-                bestAsk.map(PriceQuote::ask).orElse(null),
-                bestAsk.map(PriceQuote::exchange).orElse(null),
+                lasts[0],
+                lasts[lasts.length - 1],
+                bestBid == null ? null : bestBid.bid(),
+                bestBid == null ? null : bestBid.exchange(),
+                bestAsk == null ? null : bestAsk.ask(),
+                bestAsk == null ? null : bestAsk.exchange(),
                 quotes,
-                failures);
+                failures));
     }
 
-    private static Decimal mean(List<Decimal> sorted) {
-        Decimal sum = sorted.stream().reduce(Decimal.ZERO, Decimal::add);
-        return sum.divide(sorted.size());
-    }
-
-    private static Decimal median(List<Decimal> sorted) {
-        int mid = sorted.size() / 2;
-        if (sorted.size() % 2 == 1) {
-            return sorted.get(mid);
+    private static Decimal[] sortedLastPrices(List<PriceQuote> quotes) {
+        Decimal[] lasts = new Decimal[quotes.size()];
+        int count = 0;
+        for (PriceQuote quote : quotes) {
+            if (quote.last() != null) {
+                lasts[count++] = quote.last();
+            }
         }
-        return sorted.get(mid - 1).add(sorted.get(mid)).divide(2);
+        Decimal[] present = count == lasts.length ? lasts : Arrays.copyOf(lasts, count);
+        Arrays.sort(present);
+        return present;
+    }
+
+    private static Decimal mean(Decimal[] values) {
+        Decimal sum = Decimal.ZERO;
+        for (Decimal value : values) {
+            sum = sum.add(value);
+        }
+        return sum.divide(values.length);
+    }
+
+    private static Decimal median(Decimal[] sorted) {
+        int mid = sorted.length / 2;
+        if (sorted.length % 2 == 1) {
+            return sorted[mid];
+        }
+        return sorted[mid - 1].add(sorted[mid]).divide(2);
     }
 
     /** Null when no exchange reports volume, or the notional exceeds the configured range. */
@@ -82,10 +97,23 @@ public class PriceAggregator {
         }
     }
 
-    private static Optional<PriceQuote> best(List<PriceQuote> quotes, Function<PriceQuote, Decimal> field,
-                                             Comparator<Decimal> order) {
-        return quotes.stream()
-                .filter(q -> field.apply(q) != null && field.apply(q).signum() > 0)
-                .min(Comparator.comparing(field, order));
+    /**
+     * The quote with the highest (or lowest) positive {@code field}, the first one on a tie; null
+     * when no quote has one.
+     */
+    private static PriceQuote best(List<PriceQuote> quotes, Function<PriceQuote, Decimal> field, boolean highest) {
+        PriceQuote best = null;
+        Decimal bestValue = null;
+        for (PriceQuote quote : quotes) {
+            Decimal value = field.apply(quote);
+            if (value == null || value.signum() <= 0) {
+                continue;
+            }
+            if (bestValue == null || (highest ? value.compareTo(bestValue) > 0 : value.compareTo(bestValue) < 0)) {
+                best = quote;
+                bestValue = value;
+            }
+        }
+        return best;
     }
 }

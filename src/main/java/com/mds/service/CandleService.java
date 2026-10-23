@@ -126,10 +126,9 @@ public class CandleService implements SmartLifecycle {
         if (update.quote().last() != null) {
             applyAll(update.quote().exchange(), update.pair(), update.quote().last(), at);
         }
-        try {
-            applyAll(INDEX, update.pair(), priceService.aggregate(update.pair()).median(), at);
-        } catch (PriceUnavailableException | PairNotSubscribedException e) {
-            // no fresh price to index yet
+        // the index covers configured pairs only, and has no candle while no exchange has a fresh price
+        if (pairs.contains(update.pair())) {
+            priceService.current(update.pair()).ifPresent(index -> applyAll(INDEX, update.pair(), index.median(), at));
         }
     }
 
@@ -184,15 +183,26 @@ public class CandleService implements SmartLifecycle {
 
     /** Closes ended periods and writes completed plus in-progress candles. */
     synchronized void flush() {
-        Instant now = clock.instant();
+        closeEndedPeriods(clock.instant());
+        write(drainCompleted());
+    }
+
+    private void closeEndedPeriods(Instant now) {
         for (Key key : open.keySet()) {
             open.computeIfPresent(key, (k, candle) -> rollForward(candle, now, isActive(k)));
         }
+    }
 
+    private List<Candle> drainCompleted() {
         List<Candle> finished = new ArrayList<>();
         for (Candle candle; (candle = completed.poll()) != null; ) {
             finished.add(candle);
         }
+        return finished;
+    }
+
+    /** Writes the finished candles with every in-progress one; on failure the finished ones are queued again. */
+    private void write(List<Candle> finished) {
         List<Candle> batch = new ArrayList<>(finished);
         batch.addAll(open.values());
         try {
@@ -225,15 +235,7 @@ public class CandleService implements SmartLifecycle {
         int before = completed.size();
         for (Candle candle : stored) {
             Key key = new Key(candle.source(), MarketPair.parse(candle.pair()), candle.period());
-            boolean active = isActive(key);
-            Candle current;
-            if (candle.complete()) {
-                // already final; resume from the period after it
-                current = active ? rollForward(candle.carriedForward(candle.period().end(candle.start(), zone)), now,
-                        true) : null;
-            } else {
-                current = rollForward(candle, now, active);
-            }
+            Candle current = resume(candle, now, isActive(key));
             if (current != null) {
                 open.put(key, current);
                 resumed++;
@@ -241,6 +243,18 @@ public class CandleService implements SmartLifecycle {
         }
         LogEvent.CANDLES_RECOVERED.at(log).with("series", resumed)
                 .with("backfill_count", completed.size() - before).log();
+    }
+
+    /**
+     * The candle that continues a stored series at {@code now}, or null if the series has ended
+     * because its source is no longer active.
+     */
+    private Candle resume(Candle stored, Instant now, boolean active) {
+        if (!stored.complete()) {
+            return rollForward(stored, now, active);
+        }
+        // already final; resume from the period after it
+        return active ? rollForward(stored.carriedForward(stored.period().end(stored.start(), zone)), now, true) : null;
     }
 
     // ---- queries ----
