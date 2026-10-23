@@ -10,6 +10,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
 
 import static java.util.stream.Collectors.toSet;
@@ -25,6 +26,8 @@ import com.mds.model.CandlePeriod;
 import com.mds.model.MarketPair;
 import com.mds.model.QuoteUpdate;
 import com.mds.persistence.PriceRepository;
+import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.Timer;
 import io.reactivex.rxjava3.core.Scheduler;
 import io.reactivex.rxjava3.disposables.Disposable;
 import io.reactivex.rxjava3.schedulers.Schedulers;
@@ -92,18 +95,19 @@ public class CandleService implements SmartLifecycle {
     private final Scheduler updateScheduler;
     private final Set<String> exchanges;
     private final Set<MarketPair> pairs;
+    private final Timer lag;
     private volatile Disposable subscription;
     private volatile boolean updatesFailing;
 
     @Autowired
     public CandleService(QuoteBook quoteBook, PriceService priceService, PriceRepository repository, Cluster cluster,
-                         MdsProperties properties, Clock clock) {
-        this(quoteBook, priceService, repository, cluster, properties, clock, Schedulers.newThread());
+                         MdsProperties properties, Clock clock, MeterRegistry registry) {
+        this(quoteBook, priceService, repository, cluster, properties, clock, registry, Schedulers.newThread());
     }
 
     /** With an explicit scheduler for candle updates, so tests can apply them synchronously. */
     public CandleService(QuoteBook quoteBook, PriceService priceService, PriceRepository repository, Cluster cluster,
-                         MdsProperties properties, Clock clock, Scheduler updateScheduler) {
+                         MdsProperties properties, Clock clock, MeterRegistry registry, Scheduler updateScheduler) {
         this.quoteBook = quoteBook;
         this.priceService = priceService;
         this.repository = repository;
@@ -116,6 +120,10 @@ public class CandleService implements SmartLifecycle {
         this.updateScheduler = updateScheduler;
         this.exchanges = properties.exchanges().stream().map(e -> e.toLowerCase(Locale.ROOT)).collect(toSet());
         this.pairs = properties.pairs().stream().map(MarketPair::parse).collect(toSet());
+        // updates wait in the update scheduler's queue: a growing lag means candles fall behind
+        this.lag = Timer.builder("mds.candles.lag")
+                .description("From receiving a quote update to applying it to this member's candles")
+                .register(registry);
     }
 
     // ---- lifecycle ----
@@ -162,6 +170,7 @@ public class CandleService implements SmartLifecycle {
         try {
             ensureLoaded(pair);
             apply(update);
+            lag.record(System.nanoTime() - update.receivedNanos(), TimeUnit.NANOSECONDS);
             updatesFailing = false;
         } catch (RuntimeException e) {
             if (!updatesFailing) {

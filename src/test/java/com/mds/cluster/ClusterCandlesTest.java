@@ -196,7 +196,7 @@ class ClusterCandlesTest {
 
         final HazelcastInstance member = TestClusters.member(properties.cluster());
         final Cluster cluster = new Cluster(member, properties, new SimpleMeterRegistry());
-        final QuoteBook book = new QuoteBook(clock);
+        final QuoteBook book = new QuoteBook(clock, new SimpleMeterRegistry());
         final PriceRepository repository = mock(PriceRepository.class);
         final List<Candle> written = new CopyOnWriteArrayList<>();
         final List<AggregatedPrice> archived = new CopyOnWriteArrayList<>();
@@ -210,7 +210,7 @@ class ClusterCandlesTest {
             when(repository.findLatestCandles(any(), any())).thenReturn(List.of());
             doAnswer(inv -> written.addAll(inv.getArgument(0))).when(repository).saveCandles(anyList());
             doAnswer(inv -> archived.addAll(inv.getArgument(0))).when(repository).save(anyList());
-            candles = new CandleService(book, prices, repository, cluster, properties, clock, Schedulers.trampoline());
+            candles = new CandleService(book, prices, repository, cluster, properties, clock, new SimpleMeterRegistry(), Schedulers.trampoline());
             archiver = new PriceArchiver(prices, repository, cluster);
         }
 
