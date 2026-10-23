@@ -10,6 +10,9 @@ spec:
     - name: http
       port: 80
       targetPort: http
+    - name: grpc
+      port: 9090
+      targetPort: grpc
 ---
 # Headless: its DNS name resolves to every pod's IP, which is how members find each other
 # (MDS_CLUSTER_KUBERNETES_SERVICE_DNS). Not-ready pods are listed too, so pods starting together

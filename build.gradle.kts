@@ -2,6 +2,8 @@ plugins {
     java
     id("org.springframework.boot") version "4.1.1"
     id("io.spring.dependency-management") version "1.1.7"
+    // the Spring Boot plugin sets up protoc and the gRPC generator with the BOM's versions
+    id("com.google.protobuf") version "0.10.0"
 }
 
 group = "com.mds"
@@ -26,6 +28,8 @@ dependencies {
     implementation("org.springframework.boot:spring-boot-starter-webmvc")
     implementation("org.springframework.boot:spring-boot-starter-websocket")
     implementation("org.springframework.boot:spring-boot-starter-actuator")
+    // gRPC API on its own port (src/main/proto); versions from the Spring Boot BOM
+    implementation("org.springframework.boot:spring-boot-starter-grpc-server")
 
     // Exchange connectivity (WebSocket streams; each pulls in its REST module for metadata)
     implementation("org.knowm.xchange:xchange-stream-core:$xchangeVersion")
@@ -55,6 +59,8 @@ dependencies {
 
     testImplementation("org.springframework.boot:spring-boot-starter-test")
     testImplementation("org.springframework.boot:spring-boot-starter-webmvc-test")
+    testImplementation("org.springframework.boot:spring-boot-starter-grpc-server-test")
+    testImplementation("io.grpc:grpc-inprocess")
     testCompileOnly("org.projectlombok:lombok")
     testAnnotationProcessor("org.projectlombok:lombok")
     testRuntimeOnly("org.junit.platform:junit-platform-launcher")
@@ -62,4 +68,27 @@ dependencies {
 
 tasks.withType<Test> {
     useJUnitPlatform()
+}
+
+
+protobuf {
+    // protoc comes from the Spring Boot plugin; the gRPC stub generator matches the BOM's grpc-java
+    plugins {
+        maybeCreate("grpc").artifact =
+            "io.grpc:protoc-gen-grpc-java:${dependencyManagement.importedProperties["grpc-java.version"]}"
+    }
+    generateProtoTasks {
+        all().configureEach {
+            plugins { maybeCreate("grpc") }
+        }
+    }
+}
+
+// gRPC load client for README "Capacity": ./gradlew grpcLoad -Pargs="<subscribers> <rate> <seconds> ..."
+tasks.register<JavaExec>("grpcLoad") {
+    description = "Opens gRPC price streams against a running instance and reports throughput"
+    classpath = sourceSets["test"].runtimeClasspath
+    mainClass = "com.mds.load.GrpcLoad"
+    jvmArgs("-Xmx2g")
+    args = (findProperty("args") as String? ?: "").split(" ").filter { it.isNotBlank() }
 }

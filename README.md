@@ -15,6 +15,7 @@ EKS behind an ALB), see [`docs/deployment.md`](docs/deployment.md).
 | Exchange streams | Streams tickers from Binance, Kraken, Bitstamp, KuCoin and Bitfinex over WebSocket, and reconnects by itself | [Configuration](#configuration) |
 | Aggregated prices | Mean, median, VWAP, min, max and best bid/ask per pair across the exchanges, leaving out stale quotes | [REST API](#rest-api) |
 | Real-time streams | Server-Sent Events, and a WebSocket carrying several pairs, each at its own rate (1 to 10 per second, or every change) | [Real-time subscriptions](#real-time-subscriptions-rates) |
+| gRPC API | Prices and streams over gRPC (port 9090) in compact protobuf: 111 bytes per event against about 1,300 for SSE, with gzip where it pays | [gRPC API](#grpc-api) |
 | Stream heartbeats | An SSE comment line or WebSocket ping every 30 s, so load balancers don't close quiet streams (`MDS_STREAM_HEARTBEAT`) | [Timeouts](docs/deployment.md#timeouts) |
 | OHLC candles | Day, week, month and year candles for the index and each exchange, kept across restarts | [OHLC candles](#ohlc-candles) |
 | History | Price snapshots and candles archived in InfluxDB and served over REST | [InfluxDB schema](#influxdb-schema) |
@@ -255,6 +256,61 @@ the best bid/ask across exchanges and which exchange quoted them, the underlying
 `failures` for subscribed exchanges with no update yet or none within `mds.stale-after`. Errors are
 returned as RFC 9457 problem details; pairs that aren't subscribed return 404.
 
+## gRPC API
+
+The same prices over gRPC, on port 9090 (`MDS_GRPC_PORT`), for clients that want smaller messages.
+The contract is [`src/main/proto/mds/v1/market_data.proto`](src/main/proto/mds/v1/market_data.proto):
+generate a client from it in any language.
+
+| RPC | What it returns |
+|---|---|
+| `ListPairs` | the pairs and exchanges this instance streams |
+| `GetPrice(pair, include_quotes)` | the current aggregate for a pair |
+| `StreamPrices(subscriptions, include_quotes)` | a stream for one or more pairs, each at its own rate (`rate_per_second` 1 to 10, or `unlimited`): the current aggregate at once, then the latest at that rate, plus a heartbeat every 30 s |
+
+```bash
+grpcurl -plaintext localhost:9090 list                                  # reflection is on
+grpcurl -plaintext -d '{"pair":"BTC-USDT"}' localhost:9090 mds.v1.MarketData/GetPrice
+grpcurl -plaintext -d '{"subscriptions":[{"pair":"BTC-USDT","rate_per_second":2},{"pair":"ETH-USD","unlimited":true}]}' \
+    localhost:9090 mds.v1.MarketData/StreamPrices
+```
+
+**Why it's smaller.** Measured per price event against the live exchanges:
+
+| Format | Bytes per event |
+|---|---|
+| SSE (JSON, every quote) | about 1,296 |
+| gRPC with `include_quotes` | 420; 365 with gzip (−13%) |
+| gRPC, aggregates only (the default) | 111; 120 with gzip (+8%) |
+
+- **Protobuf and fixed-point integers do most of the work.** Each number is the price's own
+  `Decimal` units as an `int64` (a varint of a few bytes), with `scale` once per price: the value is
+  `units / 10^scale`, exact, with no parsing. Times are epoch milliseconds. A number nobody quoted is
+  left unset (`has_vwap()` is false), not sent as 0.
+- **Quotes only when asked.** The per-exchange quotes are most of a full aggregate; most clients only
+  need the aggregate.
+- **gzip only where it pays.** gRPC compresses each message on its own. On a 111-byte message gzip's
+  header costs more than it saves, so `mds.grpc.compression` (`MDS_GRPC_COMPRESSION`) defaults to
+  `auto`: gzip for responses with quotes only. `gzip` compresses everything and `none` nothing. A client
+  that doesn't accept gzip always gets uncompressed responses.
+
+**Behaviour.** Streams go through the same subscription path as SSE and WebSocket, so the rate
+limits, `mds.stream.max-subscribers` (each pair in a stream counts), the latency meters (tagged
+`transport=grpc`), rebalancing and shutdown behave the same:
+
+- A stream ends with **`UNAVAILABLE`** when the instance sheds it to balance load or shuts down:
+  reconnect and subscribe again.
+- A client that stops reading gets the latest price per pair once it reads again; nothing queues up
+  behind it.
+- Errors are statuses: `NOT_FOUND` (pair not streamed), `INVALID_ARGUMENT` (a bad pair or rate),
+  `UNAVAILABLE` (no fresh price yet), `RESOURCE_EXHAUSTED` (subscriber limit). Anything else is
+  `INTERNAL`, logged as [MDS-9004](docs/runbook.md#mds-9004).
+- Every call gets a request id: send `x-request-id` metadata, or one is made up. It comes back in the
+  response headers (or trailers, for a failed call) and is on every log line of the call.
+- Health: the standard `grpc.health.v1` service reports `mds.v1.MarketData` from readiness only.
+  Reflection is on, for `grpcurl`; only `/mds.v1.MarketData/*` is routed through the load balancer
+  ([`docs/deployment.md`](docs/deployment.md#grpc)).
+
 ## Configuration
 
 `src/main/resources/application.yml`; the main keys can be overridden by environment variable.
@@ -273,6 +329,8 @@ Deployed environments take their settings from AWS SSM Parameter Store and their
 | `mds.archive.enabled` / `.interval` | `MDS_ARCHIVE_INTERVAL` | `true` / `5s` |
 | `mds.stream.default-throttle` / `min-throttle` / `max-throttle` | | `1s` / `100ms` (caps `rate` at 10/s) / `60s` |
 | `mds.stream.timeout` / `max-subscribers` | | `30m` / `1000` |
+| `spring.grpc.server.port` | `MDS_GRPC_PORT` | `9090` for the [gRPC API](#grpc-api) |
+| `mds.grpc.compression` | `MDS_GRPC_COMPRESSION` | `auto` (gzip only for responses with quotes), `gzip` or `none` |
 | `mds.stream.heartbeat` | `MDS_STREAM_HEARTBEAT` | `30s`: an SSE comment or WebSocket ping on every open stream; `0` turns it off. Must be shorter than the load balancer's idle timeout |
 | `mds.stream.allow-unthrottled` | `MDS_STREAM_ALLOW_UNTHROTTLED` | `true` (permits `rate=unlimited`) |
 | `mds.stream.allowed-origins` | `MDS_STREAM_ALLOWED_ORIGINS` | `*` (browser origins for WebSocket) |
@@ -717,7 +775,7 @@ Micrometer meters, visible at `/actuator/metrics/{name}` and tagged `application
 | `mds.influx.query` | timer, p50/p95/p99 | `measurement`, `outcome` |
 | `mds.influx.query.rows` | distribution | `measurement` |
 | `mds.quotes.received` | counter | `exchange`: quote updates received; the input rate everything else scales with |
-| `mds.stream.subscribers` | gauge | `transport` (`sse`/`websocket`) |
+| `mds.stream.subscribers` | gauge | `transport` (`sse`/`websocket`/`grpc`) |
 | `mds.stream.events` | counter | `pair`, `transport` |
 | `mds.stream.latency` | timer, p50/p95/p99 | `transport`: from receiving an exchange update to handing the event to the subscriber's connection ([Latency](#latency)) |
 | `mds.stream.queue` | timer, p50/p95/p99 | `transport`: from a subscriber's rate letting an event go to handing it over: the internal delay |
@@ -798,13 +856,42 @@ What it shows:
   to 100 ms for its next slot); with every change sent it was 5 ms at p99.
 - **Memory:** about 0.1 MiB of heap per subscriber, on top of about 100 MiB.
 
+**gRPC, the same scenarios** (`./gradlew grpcLoad`, one connection per subscriber, aggregates only
+unless stated):
+
+| Subscribers × rate | Events out/s | CPU (cores) | Heap | Egress | Latency p50 / p99 | Queue p50 / p99 | Candle lag p99 |
+|---|---|---|---|---|---|---|---|
+| none | 0 | 0.11 | 93 MiB | – | – | – | 1.3 ms |
+| 500 × 1/s | 500 | 0.19 | 92 MiB | 0.05 MB/s | 48 / 193 ms | 0.1 / 1.4 ms | 3.8 ms |
+| 500 × 10/s | 4,378 | 0.57 | 126 MiB | 0.46 MB/s | 34 / 105 ms | 0.1 / 1.4 ms | 10.5 ms |
+| 1,000 × 10/s | 8,742 | 0.72 | 145 MiB | 0.92 MB/s | 30 / 105 ms | 0.1 / 1.8 ms | 13.6 ms |
+| 2,000 × 10/s | 17,315 | 1.14 | 140 MiB | 1.8 MB/s | 33 / 105 ms | 0.1 / 1.6 ms | 10.5 ms |
+| 4,000 × 10/s | 31,769 | 1.52 | 130 MiB | 3.3 MB/s | 33 / 105 ms | 0.2 / 3.4 ms | 33.6 ms |
+| 1,000 × every change | 11,649 | 0.70 | 150 MiB | 1.2 MB/s | 0.4 / 4.5 ms | 0.2 / 3.9 ms | 26.2 ms |
+| 1,000 × 10/s with quotes (gzip) | 8,564 | 1.02 | 112 MiB | 2.9 MB/s | 31 / 105 ms | 0.3 / 3.2 ms | 14.2 ms |
+
+Against SSE at 4,000 subscribers × 10/s: **92% less egress** (3.3 against 39.8 MB/s: 108 bytes per
+event against 1,200), 16% less CPU (1.52 against 1.82 cores), a quarter of the heap, and a lower
+queue p99 (3.4 against 5.5 ms). Asking for quotes costs about 40% more CPU (serialising every quote,
+and gzip) for 350 bytes per event. The load client ran on the same machine; at 4,000 streams the
+candle lag rose to 34 ms at p99, still well under its 1 s alert.
+
+**gRPC buffers outside the heap.** Netty uses direct memory: about 57 MiB at 4,000 streams. The
+container image caps it at 10 MB, under which the same load still ran without errors. But while
+clients aren't reading, each stream may hold up to 32 KB before mds stops writing to it, so
+`deploy/` raises the cap with `JAVA_TOOL_OPTIONS=-XX:MaxDirectMemorySize=192m`, which the image takes
+from the heap budget.
+
 **Sizing rules**
 
 ```
 events out/s     = Σ subscribers × min(rate, changes per second of their pair)       (≈ 10.6/s here)
-cores            ≈ 0.1 + 0.06 × events out/s ÷ 1,000          → vCPUs ≈ 2 × cores
-egress           ≈ 1.2 KB × events out/s                       (SSE; WebSocket is similar)
-heap             ≈ 100 MiB + 0.1 MiB × subscribers             → container memory ≈ heap + 650 MiB
+cores            ≈ 0.1 + c × events out/s ÷ 1,000               → vCPUs ≈ 2 × cores
+                     c = 0.06 for SSE, 0.05 for gRPC, 0.1 for gRPC with quotes
+egress           ≈ bytes per event × events out/s
+                     1.2 KB for SSE (WebSocket is similar), 108 B for gRPC, 350 B for gRPC with quotes
+heap             ≈ 100 MiB + 0.1 MiB × SSE or WebSocket subscribers (gRPC subscribers: small)
+container memory ≈ heap + 650 MiB (+ 192 MiB direct memory with gRPC)
 per instance     = total ÷ (instances − instances in one AZ)    (still enough after losing an AZ)
 ```
 
@@ -823,7 +910,7 @@ per instance     = total ÷ (instances − instances in one AZ)    (still enough
 | Assumptions | Per instance after losing an AZ | Suggested task |
 |---|---|---|
 | 5 exchanges × 4 pairs, 1,000 subscribers at `rate=1` | 500 subscribers, 500 events/s: 0.13 cores, 0.6 MB/s, 150 MiB heap | 1 vCPU, 2 GiB (the `deploy/` default) |
-| 5 exchanges × 4 pairs, 5,000 subscribers at `rate=10` | 2,500 subscribers, 21,000 events/s: 1.4 cores (2.8 vCPUs), 25 MB/s (200 Mbit/s), 350 MiB heap; `max-subscribers` ≥ 2,500 | 4 vCPU, 2 GiB |
+| 5 exchanges × 4 pairs, 5,000 subscribers at `rate=10` | 2,500 subscribers, 21,000 events/s: 1.4 cores (2.8 vCPUs), 25 MB/s (200 Mbit/s), 350 MiB heap; `max-subscribers` ≥ 2,500. Over gRPC: 1.2 cores, 2.3 MB/s (18 Mbit/s) | 4 vCPU, 2 GiB |
 | 10 exchanges × 20 pairs, 20,000 subscribers at `rate=10` | With 6 instances (2 per AZ), 5,000 subscribers each after losing an AZ; with 10 exchanges a pair changes more than 10 times a second, so 10 events/s each: 50,000 events/s, 3.1 cores (6.2 vCPUs), 60 MB/s (480 Mbit/s), 600 MiB heap | 8 vCPU, 4 GiB; beyond what was measured, so load-test first |
 
 **Measuring again** (on the target instance type, or after a change to the stream path):
@@ -831,6 +918,7 @@ per instance     = total ÷ (instances − instances in one AZ)    (still enough
 ```bash
 scripts/dev.sh run --mds.stream.max-subscribers=20000 --mds.instance=agent
 node scripts/load-sse.mjs 2000 10 60     # subscribers, rate, seconds; prints events/s and KB/s
+./gradlew grpcLoad -Pargs="2000 10 60 localhost:9090 false"   # the same over gRPC (quotes: true/false)
 curl -s 'localhost:8080/actuator/metrics/process.cpu.usage'
 curl -s 'localhost:8080/actuator/metrics/mds.stream.queue.percentile?tag=phi:0.99&tag=transport:sse'
 ```
@@ -862,6 +950,8 @@ com.mds
 │                  ConfigCheck (would a restart succeed?) and its /actuator/configcheck endpoint
 ├── logging/       LogEvent catalogue, EventLog, LogFields, RequestIds
 ├── exchange/      SupportedExchange, MarketStreamManager (WebSocket lifecycle), stream health check
+├── grpc/          MarketDataService (the gRPC API in src/main/proto), PriceStream, PriceMessages, GrpcErrors,
+│                  GrpcRequestIds; generated stubs in com.mds.grpc.v1
 ├── math/          Decimal (fixed-point) and its JSON serializer
 ├── model/         MarketPair, PriceQuote, AggregatedPrice, Candle, CandlePeriod, ExchangeStatus, history rows
 ├── service/       QuoteBook (live quotes), PriceService, PriceAggregator, PriceArchiver (@Scheduled),

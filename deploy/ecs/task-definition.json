@@ -14,7 +14,8 @@
       "essential": true,
       "portMappings": [
         { "name": "http", "containerPort": 8080, "protocol": "tcp" },
-        { "name": "hazelcast", "containerPort": 5701, "protocol": "tcp" }
+        { "name": "hazelcast", "containerPort": 5701, "protocol": "tcp" },
+        { "name": "grpc", "containerPort": 9090, "protocol": "tcp" }
       ],
       "environment": [
         { "name": "MDS_MODE", "value": "production" },
@@ -30,7 +31,8 @@
         { "name": "MDS_VAULT_PATH", "value": "mds/prod" },
         { "name": "MDS_STREAM_ALLOWED_ORIGINS", "value": "https://app.example.com" },
         { "name": "MDS_STREAM_ALLOW_UNTHROTTLED", "value": "false" },
-        { "name": "BPL_JAVA_NMT_ENABLED", "value": "false" }
+        { "name": "BPL_JAVA_NMT_ENABLED", "value": "false" },
+        { "name": "JAVA_TOOL_OPTIONS", "value": "-XX:MaxDirectMemorySize=192m" }
       ],
       "stopTimeout": 60,
       "readonlyRootFilesystem": true,

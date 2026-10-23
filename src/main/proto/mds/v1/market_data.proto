@@ -1,0 +1,106 @@
+// mds gRPC API, version 1: aggregated crypto prices, on request and as streams.
+//
+// Compact on the wire: numbers are fixed-point integers (int64 units of 10^-scale, a varint of a
+// few bytes) rather than decimal strings, times are epoch milliseconds, and the per-exchange quotes
+// that make up most of a full aggregate are sent only when asked for. Responses are gzip-compressed
+// when the client accepts it and the server has it on (mds.grpc.compression).
+syntax = "proto3";
+
+package mds.v1;
+
+option java_multiple_files = true;
+option java_package = "com.mds.grpc.v1";
+option java_outer_classname = "MarketDataProto";
+
+service MarketData {
+  // The pairs and exchanges this instance streams.
+  rpc ListPairs(ListPairsRequest) returns (ListPairsResponse);
+
+  // The current aggregate for one pair. NOT_FOUND for a pair that isn't streamed, UNAVAILABLE while
+  // no exchange has a fresh price.
+  rpc GetPrice(GetPriceRequest) returns (Price);
+
+  // Aggregates for one or more pairs, each at its own rate: the current one at once, then at most
+  // the requested number per second, always the latest state. The stream also carries a heartbeat
+  // so load balancers keep it open. It ends with UNAVAILABLE when the server moves the client to a
+  // less loaded instance or shuts down: reconnect and subscribe again.
+  rpc StreamPrices(StreamPricesRequest) returns (stream StreamEvent);
+}
+
+message ListPairsRequest {}
+
+message ListPairsResponse {
+  repeated string pairs = 1;      // e.g. "BTC/USDT"
+  repeated string exchanges = 2;  // e.g. "kraken"
+}
+
+message GetPriceRequest {
+  string pair = 1;               // "BTC-USDT" or "BTC/USDT"
+  bool include_quotes = 2;       // also send each exchange's quote and the failures (larger)
+}
+
+message StreamPricesRequest {
+  repeated Subscription subscriptions = 1;
+  bool include_quotes = 2;       // also send each exchange's quote and the failures (larger)
+}
+
+message Subscription {
+  string pair = 1;
+  // Updates per second, 1 to the server's maximum (10 by default); 0 means the server's default
+  // rate. Ignored when unlimited is set.
+  uint32 rate_per_second = 2;
+  bool unlimited = 3;            // every change; refused when the server disallows it
+}
+
+message StreamEvent {
+  oneof event {
+    PriceUpdate price = 1;
+    Heartbeat heartbeat = 2;
+  }
+}
+
+message PriceUpdate {
+  string pair = 1;
+  uint64 seq = 2;                // counts price updates per pair in this stream, from 1
+  Price price = 3;
+}
+
+// Sent every mds.stream.heartbeat (30 s by default) so idle timeouts don't close a quiet stream.
+message Heartbeat {}
+
+// A number is units / 10^scale, with one scale for every number in a Price. An absent number (no
+// exchange quoted it) is 0 with its has_ bit clear: check has_vwap() and so on.
+message Price {
+  string pair = 1;
+  int64 timestamp_ms = 2;
+  uint32 scale = 3;
+  uint32 sources = 4;            // exchanges with a fresh quote
+  optional int64 mean = 5;
+  optional int64 median = 6;
+  optional int64 vwap = 7;
+  optional int64 min = 8;
+  optional int64 max = 9;
+  optional int64 best_bid = 10;
+  string best_bid_exchange = 11;
+  optional int64 best_ask = 12;
+  string best_ask_exchange = 13;
+  repeated Quote quotes = 14;     // only with include_quotes
+  repeated Failure failures = 15; // only with include_quotes
+}
+
+message Quote {
+  string exchange = 1;
+  optional int64 last = 2;
+  optional int64 bid = 3;
+  optional int64 ask = 4;
+  optional int64 high = 5;
+  optional int64 low = 6;
+  optional int64 volume = 7;
+  optional int64 quote_volume = 8;
+  int64 timestamp_ms = 9;
+}
+
+message Failure {
+  string exchange = 1;
+  string reason = 2;
+}
