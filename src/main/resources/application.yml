@@ -34,6 +34,9 @@ mds:
     max-subscribers: 1000       # SSE connections + WebSocket pair subscriptions
     allow-unthrottled: ${MDS_STREAM_ALLOW_UNTHROTTLED:true}   # permit rate=unlimited
     allowed-origins: ${MDS_STREAM_ALLOWED_ORIGINS:*}          # browser origins allowed to open WebSockets
+    # An SSE comment / WebSocket ping on every open stream, so load balancers (ALB idle timeout:
+    # 120s in docs/deployment.md) don't close quiet ones. 0 = off.
+    heartbeat: ${MDS_STREAM_HEARTBEAT:30s}
   ohlc:
     # midnight in this zone starts each day/week (Monday)/month/year candle
     zone: ${MDS_OHLC_ZONE:UTC}

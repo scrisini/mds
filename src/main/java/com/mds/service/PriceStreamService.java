@@ -28,6 +28,7 @@ import io.reactivex.rxjava3.core.Maybe;
 import io.reactivex.rxjava3.core.Observable;
 import io.reactivex.rxjava3.core.Scheduler;
 import io.reactivex.rxjava3.disposables.CompositeDisposable;
+import io.reactivex.rxjava3.disposables.Disposable;
 import io.reactivex.rxjava3.schedulers.Schedulers;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -48,6 +49,10 @@ import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
  *
  * <p>Metrics: {@code mds.stream.subscribers} gauge and {@code mds.stream.events} counter, both
  * tagged {@code transport} ({@code sse}/{@code websocket}); events also tagged {@code pair}.
+ *
+ * <p>Every open stream also gets a heartbeat every {@code mds.stream.heartbeat}, so load balancers
+ * and proxies don't close a connection while its pair is quiet: one ticker for all of them, with
+ * each connection sending on its own thread like its prices.
  *
  * <p>On shutdown it stops first, before the exchange streams, and closes every subscription as
  * {@linkplain #shed shedding} does. Otherwise the web server's graceful shutdown would wait for
@@ -73,6 +78,7 @@ public class PriceStreamService implements SmartLifecycle {
     // by opening order, so shedding can pick the newest
     private final ConcurrentSkipListMap<Long, Subscription> openByAge = new ConcurrentSkipListMap<>();
     private final Map<String, AtomicInteger> subscribersByTransport = new ConcurrentHashMap<>();
+    private final Flowable<Long> heartbeats;
     private volatile boolean running;
 
     @Autowired
@@ -90,6 +96,7 @@ public class PriceStreamService implements SmartLifecycle {
         this.registry = registry;
         this.throttleScheduler = throttleScheduler;
         this.sendScheduler = sendScheduler;
+        this.heartbeats = ticker(settings.heartbeat(), throttleScheduler);
         for (String transport : new String[] {SSE, WEBSOCKET}) {
             AtomicInteger count = new AtomicInteger();
             subscribersByTransport.put(transport, count);
@@ -188,6 +195,11 @@ public class PriceStreamService implements SmartLifecycle {
      */
     public StreamSubscription open(MarketPair pair, StreamRate rate, String transport,
                                    PriceListener onPrice, Consumer<Throwable> onError, Runnable onShed) {
+        return start(pair, rate, transport, onPrice, onError, onShed);
+    }
+
+    private Subscription start(MarketPair pair, StreamRate rate, String transport,
+                               PriceListener onPrice, Consumer<Throwable> onError, Runnable onShed) {
         if (!priceService.pairs().contains(pair)) {
             throw new PairNotSubscribedException(pair, priceService.pairs());
         }
@@ -206,6 +218,18 @@ public class PriceStreamService implements SmartLifecycle {
                 }));
         log.debug("{} subscription for {} opened at {}", transport, pair, rate);
         return subscription;
+    }
+
+    /**
+     * Calls {@code beat} every {@code mds.stream.heartbeat} on a send thread, until disposed; never
+     * while the heartbeat is off. Ticks missed while {@code beat} is busy are dropped. An exception
+     * from {@code beat} stops it and goes to {@code onError}.
+     */
+    public Disposable heartbeat(Heartbeat beat, Consumer<Throwable> onError) {
+        return heartbeats
+                .onBackpressureDrop()
+                .observeOn(sendScheduler, false, 1)
+                .subscribe(tick -> beat.send(), onError::accept);
     }
 
     /** Subscriptions open on this instance. */
@@ -262,10 +286,13 @@ public class PriceStreamService implements SmartLifecycle {
     public SseEmitter subscribe(MarketPair pair, StreamRate rate) {
         SseEmitter emitter = new SseEmitter(settings.timeout().toMillis());
         AtomicLong sequence = new AtomicLong();
-        StreamSubscription subscription = open(pair, rate, SSE,
+        Subscription subscription = start(pair, rate, SSE,
                 price -> send(emitter, sequence.incrementAndGet(), price),
                 emitter::completeWithError,
                 () -> reconnectElsewhere(emitter));
+        // an SSE comment line, ": heartbeat", which EventSource ignores
+        subscription.disposable.add(heartbeat(() -> emitter.send(SseEmitter.event().comment("heartbeat")),
+                emitter::completeWithError));
         emitter.onCompletion(subscription::close);
         emitter.onTimeout(subscription::close);
         emitter.onError(e -> subscription.close());
@@ -287,6 +314,16 @@ public class PriceStreamService implements SmartLifecycle {
                 .toFlowable(BackpressureStrategy.LATEST)
                 .observeOn(sendScheduler, false, 1)
                 .concatMapMaybe(p -> Maybe.fromOptional(priceService.current(p)));
+    }
+
+    /** One shared tick for every heartbeat; never ticks when {@code interval} is zero. */
+    private static Flowable<Long> ticker(Duration interval, Scheduler scheduler) {
+        if (interval.isZero()) {
+            return Flowable.never();
+        }
+        return Flowable.interval(interval.toNanos(), interval.toNanos(), TimeUnit.NANOSECONDS, scheduler)
+                .onBackpressureDrop()
+                .share();
     }
 
     /** Ends the stream with a {@code reconnect} event; EventSource clients reconnect after a second. */
@@ -356,6 +393,12 @@ public class PriceStreamService implements SmartLifecycle {
                 log.debug("{} subscription for {} closed", transport, pair);
             }
         }
+    }
+
+    /** Sends one heartbeat; may throw when the client has gone. */
+    @FunctionalInterface
+    public interface Heartbeat {
+        void send() throws Exception;
     }
 
     /** Receives each aggregate; may throw to end the subscription (e.g. the client went away). */

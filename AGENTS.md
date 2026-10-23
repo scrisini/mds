@@ -142,8 +142,8 @@ com.mds
   - Tests that start members use `TestClusters` (unique names, ports from 5901). Wait for
     `isClusterSafe()` before relying on backups.
 - Real-time clients (SSE and the `/api/v1/ws/prices` WebSocket) both go through
-  `PriceStreamService.open`, which owns rates (`StreamRate`), the subscriber limit, metrics and
-  slow-client handling. Add new transports there rather than re-implementing throttling.
+  `PriceStreamService.open`, which owns rates (`StreamRate`), the subscriber limit, metrics,
+  heartbeats and slow-client handling. Add new transports there rather than re-implementing throttling.
   `WebSocketSession` isn't thread-safe: send only through the `ConcurrentWebSocketSessionDecorator`
   in `PriceWebSocketHandler`.
 - **Outgoing traffic must honour `mds.socks-proxy`** (a security requirement where it's used).

@@ -168,6 +168,9 @@ curl -N 'localhost:8080/api/v1/stream/prices/ETH-USD?rate=unlimited'
 
 Each event is named `price`, has an increasing `id`, and carries an aggregate. Connections close
 after `mds.stream.timeout` (EventSource clients reconnect automatically). Invalid rates get 400.
+Every `mds.stream.heartbeat` (30 s) the stream also carries a comment line, `:heartbeat`, so load
+balancers and proxies don't close it while the pair is quiet; `EventSource` ignores comments, and
+other clients should skip lines that start with `:`.
 
 ### WebSocket
 
@@ -195,7 +198,10 @@ Connect to `ws://localhost:8080/api/v1/ws/prices` and send JSON commands:
   waiting, instead of the server buffering without limit.
 - Browsers may connect only from `mds.stream.allowed-origins` (default `*`). Non-browser clients
   aren't affected.
-- Idle sockets close after `mds.stream.timeout`.
+- While a socket has a subscription, the server sends a WebSocket ping every
+  `mds.stream.heartbeat` (30 s), so load balancers keep it open while its pairs are quiet. Browsers
+  and most client libraries answer pings by themselves; page scripts never see them.
+- Sockets with no subscription close after `mds.stream.timeout` without activity.
 
 From a browser or Node 22+:
 
@@ -231,6 +237,7 @@ Deployed environments take their settings from AWS SSM Parameter Store and their
 | `mds.archive.enabled` / `.interval` | `MDS_ARCHIVE_INTERVAL` | `true` / `5s` |
 | `mds.stream.default-throttle` / `min-throttle` / `max-throttle` | | `1s` / `100ms` (caps `rate` at 10/s) / `60s` |
 | `mds.stream.timeout` / `max-subscribers` | | `30m` / `1000` |
+| `mds.stream.heartbeat` | `MDS_STREAM_HEARTBEAT` | `30s`: an SSE comment or WebSocket ping on every open stream; `0` turns it off. Must be shorter than the load balancer's idle timeout |
 | `mds.stream.allow-unthrottled` | `MDS_STREAM_ALLOW_UNTHROTTLED` | `true` (permits `rate=unlimited`) |
 | `mds.stream.allowed-origins` | `MDS_STREAM_ALLOWED_ORIGINS` | `*` (browser origins for WebSocket) |
 | `mds.decimal.scale` / `.rounding` | `MDS_DECIMAL_SCALE` / `MDS_DECIMAL_ROUNDING` | `8` / `HALF_EVEN` |
