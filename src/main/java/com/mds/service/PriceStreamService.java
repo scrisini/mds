@@ -5,6 +5,7 @@ import java.time.Duration;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentSkipListMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -59,6 +60,9 @@ public class PriceStreamService {
     private final Scheduler throttleScheduler;
     private final Scheduler sendScheduler;
     private final AtomicInteger subscribers = new AtomicInteger();
+    private final AtomicLong opened = new AtomicLong();
+    // by opening order, so shedding can pick the newest
+    private final ConcurrentSkipListMap<Long, Subscription> openByAge = new ConcurrentSkipListMap<>();
     private final Map<String, AtomicInteger> subscribersByTransport = new ConcurrentHashMap<>();
 
     @Autowired
@@ -138,19 +142,21 @@ public class PriceStreamService {
     /**
      * Starts a subscription that calls {@code onPrice} with each aggregate (on a virtual thread; a
      * slow callback holds back only its own subscription). Errors thrown by {@code onPrice}
-     * end the subscription and are passed to {@code onError}.
+     * end the subscription and are passed to {@code onError}. {@code onShed} disconnects the client
+     * when the subscription is {@linkplain #shed shed} to balance load, so it reconnects elsewhere.
      *
      * @throws PairNotSubscribedException if the pair isn't streamed
      * @throws StreamCapacityException    if {@code mds.stream.max-subscribers} is reached
      */
     public StreamSubscription open(MarketPair pair, StreamRate rate, String transport,
-                                   PriceListener onPrice, Consumer<Throwable> onError) {
+                                   PriceListener onPrice, Consumer<Throwable> onError, Runnable onShed) {
         if (!priceService.pairs().contains(pair)) {
             throw new PairNotSubscribedException(pair, priceService.pairs());
         }
         AtomicInteger transportCount = reserveSlot(transport);
         Counter events = eventsCounter(pair, transport);
-        Subscription subscription = new Subscription(pair, rate, transport, transportCount);
+        Subscription subscription = new Subscription(pair, rate, transport, transportCount, onShed);
+        openByAge.put(subscription.id, subscription);
         subscription.disposable.add(updates(pair, rate).subscribe(
                 price -> {
                     onPrice.accept(price);
@@ -162,6 +168,28 @@ public class PriceStreamService {
                 }));
         log.debug("{} subscription for {} opened at {}", transport, pair, rate);
         return subscription;
+    }
+
+    /** Subscriptions open on this instance. */
+    public int subscribers() {
+        return subscribers.get();
+    }
+
+    /**
+     * Closes up to {@code count} subscriptions, newest first so long-running clients are disturbed
+     * least, and disconnects their clients so they reconnect, through the load balancer, to another
+     * instance. A WebSocket carries several subscriptions and closing it ends all of them, so this
+     * stops once {@code count} have ended. Returns how many ended.
+     */
+    public int shed(int count) {
+        int before = subscribers.get();
+        for (Subscription subscription : openByAge.descendingMap().values()) {
+            if (before - subscribers.get() >= count) {
+                break;
+            }
+            subscription.shed();
+        }
+        return before - subscribers.get();
     }
 
     /**
@@ -198,7 +226,8 @@ public class PriceStreamService {
         AtomicLong sequence = new AtomicLong();
         StreamSubscription subscription = open(pair, rate, SSE,
                 price -> send(emitter, sequence.incrementAndGet(), price),
-                emitter::completeWithError);
+                emitter::completeWithError,
+                () -> reconnectElsewhere(emitter));
         emitter.onCompletion(subscription::close);
         emitter.onTimeout(subscription::close);
         emitter.onError(e -> subscription.close());
@@ -222,6 +251,16 @@ public class PriceStreamService {
                 .concatMapMaybe(p -> Maybe.fromOptional(priceService.current(p)));
     }
 
+    /** Ends the stream with a {@code reconnect} event; EventSource clients reconnect after a second. */
+    private static void reconnectElsewhere(SseEmitter emitter) {
+        try {
+            emitter.send(SseEmitter.event().name("reconnect").reconnectTime(1000).data("rebalancing"));
+        } catch (IOException e) {
+            // already gone
+        }
+        emitter.complete();
+    }
+
     private static void send(SseEmitter emitter, long id, AggregatedPrice price) throws IOException {
         emitter.send(SseEmitter.event()
                 .id(Long.toString(id))
@@ -232,18 +271,31 @@ public class PriceStreamService {
     /** An open subscription; closing it stops its updates and frees its slot, once. */
     private final class Subscription implements StreamSubscription {
 
+        private final long id = opened.incrementAndGet();
         private final MarketPair pair;
         private final StreamRate rate;
         private final String transport;
         private final AtomicInteger transportCount;
+        private final Runnable onShed;
         private final CompositeDisposable disposable = new CompositeDisposable();
         private final AtomicBoolean closed = new AtomicBoolean();
 
-        Subscription(MarketPair pair, StreamRate rate, String transport, AtomicInteger transportCount) {
+        Subscription(MarketPair pair, StreamRate rate, String transport, AtomicInteger transportCount,
+                     Runnable onShed) {
             this.pair = pair;
             this.rate = rate;
             this.transport = transport;
             this.transportCount = transportCount;
+            this.onShed = onShed;
+        }
+
+        /** Disconnects the client, then closes, in case disconnecting didn't. */
+        void shed() {
+            try {
+                onShed.run();
+            } finally {
+                close();
+            }
         }
 
         @Override
@@ -259,6 +311,7 @@ public class PriceStreamService {
         @Override
         public void close() {
             if (closed.compareAndSet(false, true)) {
+                openByAge.remove(id);
                 disposable.dispose();
                 subscribers.decrementAndGet();
                 transportCount.decrementAndGet();

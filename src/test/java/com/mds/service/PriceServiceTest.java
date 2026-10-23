@@ -20,6 +20,7 @@ import com.mds.math.Decimal;
 import com.mds.model.AggregatedPrice;
 import com.mds.model.MarketPair;
 import com.mds.model.QuoteFailure;
+import com.mds.support.TestClusters;
 import org.assertj.core.api.InstanceOfAssertFactories;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -43,7 +44,7 @@ class PriceServiceTest {
                         Duration.ofMinutes(30), 2, true, List.of("*")),
                 new MdsProperties.DecimalSettings(8, RoundingMode.HALF_EVEN),
                 new MdsProperties.Ohlc(ZoneOffset.UTC, Duration.ofSeconds(10)),
-                new MdsProperties.SocksProxy("", 1080));
+                new MdsProperties.SocksProxy("", 1080), TestClusters.standalone());
         service = new PriceService(streams, book, new PriceAggregator(), properties, clock);
         when(streams.exchangesFor(BTC_USDT)).thenReturn(List.of("binance", "kraken", "kucoin"));
     }

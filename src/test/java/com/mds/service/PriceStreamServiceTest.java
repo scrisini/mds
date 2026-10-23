@@ -22,6 +22,7 @@ import com.mds.exchange.MarketStreamManager;
 import com.mds.math.Decimal;
 import com.mds.model.AggregatedPrice;
 import com.mds.model.MarketPair;
+import com.mds.support.TestClusters;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import io.reactivex.rxjava3.schedulers.Schedulers;
 import io.reactivex.rxjava3.schedulers.TestScheduler;
@@ -47,7 +48,7 @@ class PriceStreamServiceTest {
                         Duration.ofMinutes(30), maxSubscribers, allowUnthrottled, List.of("*")),
                 new MdsProperties.DecimalSettings(8, RoundingMode.HALF_EVEN),
                 new MdsProperties.Ohlc(ZoneOffset.UTC, Duration.ofSeconds(10)),
-                new MdsProperties.SocksProxy("", 1080));
+                new MdsProperties.SocksProxy("", 1080), TestClusters.standalone());
         MarketStreamManager streams = mock(MarketStreamManager.class);
         when(streams.exchangesFor(BTC_USDT)).thenReturn(List.of("binance"));
         PriceService prices = new PriceService(streams, book, new PriceAggregator(), properties,
@@ -170,7 +171,7 @@ class PriceStreamServiceTest {
         List<AggregatedPrice> received = new ArrayList<>();
 
         StreamSubscription subscription = service.open(BTC_USDT, StreamRate.unthrottled(),
-                PriceStreamService.WEBSOCKET, received::add, e -> { });
+                PriceStreamService.WEBSOCKET, received::add, e -> { }, () -> { });
         trade("101");
 
         assertThat(received).extracting(AggregatedPrice::mean).containsExactly(Decimal.parse("100"), Decimal.parse("101"));
@@ -191,7 +192,7 @@ class PriceStreamServiceTest {
         List<Throwable> errors = new ArrayList<>();
 
         service.open(BTC_USDT, StreamRate.unthrottled(), PriceStreamService.SSE,
-                price -> { throw new java.io.IOException("client went away"); }, errors::add);
+                price -> { throw new java.io.IOException("client went away"); }, errors::add, () -> { });
 
         assertThat(errors).singleElement().satisfies(e -> assertThat(e).hasMessage("client went away"));
         assertThat(gauge(PriceStreamService.SSE)).isZero();
@@ -200,19 +201,35 @@ class PriceStreamServiceTest {
     @Test
     void validatesSubscriptions() {
         assertThatThrownBy(() -> service.open(MarketPair.parse("DOGE-USDT"), StreamRate.perSecond(1),
-                PriceStreamService.SSE, p -> { }, e -> { }))
+                PriceStreamService.SSE, p -> { }, e -> { }, () -> { }))
                 .isInstanceOf(PairNotSubscribedException.class);
     }
 
     @Test
     void enforcesSubscriberLimitAcrossTransports() {
-        service.open(BTC_USDT, StreamRate.perSecond(1), PriceStreamService.SSE, p -> { }, e -> { });
-        service.open(BTC_USDT, StreamRate.perSecond(1), PriceStreamService.WEBSOCKET, p -> { }, e -> { });
+        service.open(BTC_USDT, StreamRate.perSecond(1), PriceStreamService.SSE, p -> { }, e -> { }, () -> { });
+        service.open(BTC_USDT, StreamRate.perSecond(1), PriceStreamService.WEBSOCKET, p -> { }, e -> { }, () -> { });
 
         assertThatThrownBy(() -> service.open(BTC_USDT, StreamRate.perSecond(1), PriceStreamService.WEBSOCKET,
-                p -> { }, e -> { }))
+                p -> { }, e -> { }, () -> { }))
                 .isInstanceOf(StreamCapacityException.class);
         assertThat(gauge(PriceStreamService.SSE) + gauge(PriceStreamService.WEBSOCKET)).isEqualTo(2);
+    }
+
+    @Test
+    void shedsTheNewestSubscriptionsAndDisconnectsTheirClients() {
+        List<String> disconnected = new ArrayList<>();
+        StreamSubscription older = service.open(BTC_USDT, StreamRate.perSecond(1), PriceStreamService.SSE,
+                p -> { }, e -> { }, () -> disconnected.add("older"));
+        service.open(BTC_USDT, StreamRate.perSecond(1), PriceStreamService.WEBSOCKET, p -> { }, e -> { },
+                () -> disconnected.add("newer"));
+
+        assertThat(service.shed(1)).isEqualTo(1);
+
+        assertThat(disconnected).containsExactly("newer");
+        assertThat(service.subscribers()).isEqualTo(1);
+        older.close();
+        assertThat(service.shed(5)).isZero();
     }
 
     private double gauge(String transport) {

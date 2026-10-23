@@ -16,6 +16,8 @@ import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.List;
 
+import com.hazelcast.core.HazelcastInstance;
+import com.mds.cluster.Cluster;
 import com.mds.config.MdsProperties;
 import com.mds.exchange.MarketStreamManager;
 import com.mds.math.Decimal;
@@ -24,7 +26,12 @@ import com.mds.model.CandlePeriod;
 import com.mds.model.MarketPair;
 import com.mds.persistence.PriceRepository;
 import com.mds.support.MutableClock;
+import com.mds.support.TestClusters;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
+import io.reactivex.rxjava3.schedulers.Schedulers;
+import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
@@ -35,14 +42,30 @@ class CandleServiceTest {
     private static final Instant MORNING = Instant.parse("2026-10-21T09:00:00Z");
     private static final Instant TODAY = Instant.parse("2026-10-21T00:00:00Z");
 
+    private static final MdsProperties.Cluster CLUSTER = TestClusters.standalone();
+    private static HazelcastInstance member;
+
     private final MutableClock clock = new MutableClock(MORNING);
     private final QuoteBook book = new QuoteBook(clock);
     private final PriceRepository repository = mock(PriceRepository.class);
     private final List<List<Candle>> written = new ArrayList<>();
     private CandleService service;
 
+    @BeforeAll
+    static void startMember() {
+        member = TestClusters.member(CLUSTER);
+    }
+
+    @AfterAll
+    static void stopMember() {
+        member.shutdown();
+    }
+
     @BeforeEach
     void setUp() {
+        member.getMap(Cluster.CANDLES).clear();
+        member.getMap(Cluster.COMPLETED_CANDLES).clear();
+        member.getMap(Cluster.LOADED_PAIRS).clear();
         MdsProperties properties = new MdsProperties(List.of("kraken", "bitstamp"), List.of("BTC/USD"),
                 Duration.ofSeconds(10), Duration.ofSeconds(5), Duration.ofDays(400),
                 new MdsProperties.Archive(false, Duration.ofSeconds(5)),
@@ -50,12 +73,13 @@ class CandleServiceTest {
                         Duration.ofMinutes(30), 10, true, List.of("*")),
                 new MdsProperties.DecimalSettings(8, RoundingMode.HALF_EVEN),
                 new MdsProperties.Ohlc(ZoneOffset.UTC, Duration.ofSeconds(10)),
-                new MdsProperties.SocksProxy("", 1080));
+                new MdsProperties.SocksProxy("", 1080), CLUSTER);
         MarketStreamManager streams = mock(MarketStreamManager.class);
         when(streams.exchangesFor(BTC_USD)).thenReturn(List.of("bitstamp", "kraken"));
         PriceService prices = new PriceService(streams, book, new PriceAggregator(), properties, clock);
-        service = new CandleService(book, prices, repository, properties, clock);
-        when(repository.findLatestCandles(any())).thenReturn(List.of());
+        Cluster cluster = new Cluster(member, properties, new SimpleMeterRegistry());
+        service = new CandleService(book, prices, repository, cluster, properties, clock, Schedulers.trampoline());
+        when(repository.findLatestCandles(any(), any())).thenReturn(List.of());
         org.mockito.Mockito.doAnswer(inv -> written.add(List.copyOf(inv.getArgument(0))))
                 .when(repository).saveCandles(anyList());
     }
@@ -199,7 +223,7 @@ class CandleServiceTest {
                 d("90"), d("99"), d("80"), d("95"), 50, false);
         Candle thisMonth = new Candle("BTC/USD", "kraken", CandlePeriod.MONTH,
                 Instant.parse("2026-10-01T00:00:00Z"), d("70"), d("130"), d("60"), d("95"), 900, false);
-        when(repository.findLatestCandles(any())).thenReturn(List.of(yesterday, thisMonth));
+        when(repository.findLatestCandles(any(), any())).thenReturn(List.of(yesterday, thisMonth));
 
         service.start();
         trade("kraken", "140");
@@ -218,7 +242,7 @@ class CandleServiceTest {
         // last seen three days ago, before the service went down
         Candle lastSeen = new Candle("BTC/USD", "kraken", CandlePeriod.DAY, Instant.parse("2026-10-18T00:00:00Z"),
                 d("90"), d("99"), d("80"), d("95"), 50, false);
-        when(repository.findLatestCandles(any())).thenReturn(List.of(lastSeen));
+        when(repository.findLatestCandles(any(), any())).thenReturn(List.of(lastSeen));
 
         service.start();
         service.flush();
@@ -242,7 +266,7 @@ class CandleServiceTest {
         // e.g. the process died between closing yesterday and the next flush
         Candle yesterday = new Candle("BTC/USD", "kraken", CandlePeriod.DAY, TODAY.minus(Duration.ofDays(1)),
                 d("90"), d("99"), d("80"), d("95"), 50, true);
-        when(repository.findLatestCandles(any())).thenReturn(List.of(yesterday));
+        when(repository.findLatestCandles(any(), any())).thenReturn(List.of(yesterday));
 
         service.start();
         service.flush();
@@ -257,13 +281,45 @@ class CandleServiceTest {
     void stopsCarryingForwardSourcesNoLongerConfigured() {
         Candle removedExchange = new Candle("BTC/USD", "gemini", CandlePeriod.DAY, TODAY.minus(Duration.ofDays(2)),
                 d("90"), d("99"), d("80"), d("95"), 50, false);
-        when(repository.findLatestCandles(any())).thenReturn(List.of(removedExchange));
+        when(repository.findLatestCandles(any(), any())).thenReturn(List.of(removedExchange));
 
         service.start();
         service.flush();
 
         assertThat(lastBatch()).filteredOn(c -> c.source().equals("gemini")).containsExactly(removedExchange.completed());
         assertThat(service.current(BTC_USD, "gemini")).isEmpty();
+    }
+
+    @Test
+    void reloadsAPairFromInfluxDbWhenTheClusterLostItsCandles() {
+        service.start();
+        trade("kraken", "100");
+        trade("kraken", "110");
+        service.flush();
+        List<Candle> stored = lastBatch();
+        // a split, or two members failing at once: the cluster no longer holds the pair's candles
+        member.getMap(Cluster.CANDLES).clear();
+        member.getMap(Cluster.LOADED_PAIRS).clear();
+        when(repository.findLatestCandles(any(), any())).thenReturn(stored);
+
+        trade("kraken", "105");
+
+        Candle day = current("kraken", CandlePeriod.DAY);
+        assertThat(List.of(day.open(), day.high(), day.low(), day.close()))
+                .containsExactly(d("100"), d("110"), d("100"), d("105"));
+        assertThat(day.updates()).isEqualTo(3);
+    }
+
+    @Test
+    void completesTheLastCandlesOfPairsNoLongerConfigured() {
+        Candle removedPair = new Candle("LTC/USD", "kraken", CandlePeriod.DAY, TODAY.minus(Duration.ofDays(2)),
+                d("90"), d("99"), d("80"), d("95"), 50, false);
+        when(repository.findLatestCandles(any())).thenReturn(List.of(removedPair));
+
+        service.start();
+        service.flush();
+
+        assertThat(lastBatch()).filteredOn(c -> c.pair().equals("LTC/USD")).containsExactly(removedPair.completed());
     }
 
     @Test

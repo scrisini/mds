@@ -34,6 +34,21 @@ mds:
   socks-proxy:
     host: ${MDS_SOCKS_PROXY_HOST:}
     port: ${MDS_SOCKS_PROXY_PORT:1080}
+  # Embedded Hazelcast cluster: every instance sharing an InfluxDB bucket must join the same one.
+  # No members and no Kubernetes service = a cluster of one. Cluster traffic is not proxied, encrypted
+  # or authenticated: only other mds instances may reach the port.
+  cluster:
+    name: ${MDS_CLUSTER_NAME:mds}
+    port: ${MDS_CLUSTER_PORT:5701}
+    # host or host:port of other instances, comma-separated, e.g. 10.0.0.2,10.0.0.3:5701
+    members: ${MDS_CLUSTER_MEMBERS:}
+    # headless Service listing the pods, e.g. mds-hz.prod.svc.cluster.local
+    kubernetes-service-dns: ${MDS_CLUSTER_KUBERNETES_SERVICE_DNS:}
+    rebalance:
+      enabled: ${MDS_CLUSTER_REBALANCE_ENABLED:true}
+      interval: 10s
+      tolerance: 0.2
+      max-per-round: 20
   # Precision of every price and volume; fixed at startup. Range is ±Long.MAX_VALUE / 10^scale.
   decimal:
     scale: ${MDS_DECIMAL_SCALE:8}
@@ -67,6 +82,9 @@ logging:
     # XChange logs every HTTP call and WebSocket (re)subscription at INFO
     si.mazi.rescu: WARN
     info.bitrich.xchangestream: WARN
+    # Hazelcast logs its banner, partition tables and every connection at INFO; membership
+    # changes are logged as coded events (MDS-32xx)
+    com.hazelcast: WARN
   structured:
     format:
       # ecs in production: one Elastic Common Schema JSON object per line (ELK, Splunk, New Relic).

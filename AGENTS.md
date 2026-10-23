@@ -7,11 +7,13 @@ the user-facing API, configuration and InfluxDB schema.
 
 `mds` is a Spring Boot service that streams crypto tickers over WebSocket from several exchanges
 (XChange `xchange-stream-*`), aggregates them per pair, serves REST, Server-Sent Events and a client WebSocket, builds
-OHLC candles, and archives everything in InfluxDB 2.x.
+OHLC candles, and archives everything in InfluxDB 2.x. Several instances form an embedded Hazelcast
+cluster that shares the candles and balances real-time subscribers.
 
 - Java 21 (Gradle toolchain), Spring Boot 4.1, Gradle 9 via the wrapper, Lombok
 - Jackson 3 (`tools.jackson.*`); annotations still come from `com.fasterxml.jackson.annotation`
 - RxJava 3 for exchange streams and SSE throttling; Micrometer for metrics
+- Hazelcast 5.5 (embedded, version from the Spring Boot BOM) for the cluster
 
 ## Commands
 
@@ -32,12 +34,14 @@ See README "Running locally" for prerequisites and all `scripts/dev.sh` commands
 
 ```
 com.mds
+├── cluster/      Hazelcast member config, Cluster (pair ownership, shared maps), cluster health
 ├── config/       @ConfigurationProperties records (MdsProperties, InfluxProperties), beans, lifecycle logging
 ├── logging/      LogEvent catalogue, EventLog, LogFields, RequestIds: logs for production support
 ├── exchange/     SupportedExchange, MarketStreamManager (WebSocket lifecycle), Bitstamp patch
 ├── math/         Decimal fixed-point type and its JSON serializer
 ├── model/        immutable records: MarketPair, PriceQuote, AggregatedPrice, Candle, …
-├── service/      QuoteBook, PriceService, PriceAggregator, PriceArchiver, PriceStreamService, CandleService
+├── service/      QuoteBook, PriceService, PriceAggregator, PriceArchiver, PriceStreamService, StreamRebalancer,
+│                 CandleService and its cluster types (CandleKey, ApplyPrice, RollForward, CandleSerializers)
 ├── persistence/  PriceRepository (all InfluxDB reads/writes), InfluxHealthIndicator
 └── web/          REST/SSE controllers, PriceWebSocketHandler, ApiExceptionHandler (RFC 9457 problem details), RequestIdFilter
 ```
@@ -54,7 +58,7 @@ com.mds
     in `docs/runbook.md` with the same anchor and level. `LogEventCatalogueTest` fails the build if
     either is missing or they disagree.
   - Codes: `1xxx` lifecycle, `2xxx` requests and business outcomes, `30xx` exchanges, `31xx`
-    InfluxDB, `9xxx` unexpected failures.
+    InfluxDB, `32xx` the cluster, `9xxx` unexpected failures.
   - Levels: INFO for lifecycle and business outcomes, WARN for problems the service recovers from
     or that callers retry, ERROR for things a person must act on (and its summary says what happens
     next, after a `;`). Alert rules key on codes, so keep a code's level stable.
@@ -109,7 +113,21 @@ com.mds
 - `PatchedBitstampStreamingExchange` works around XChange 6.0.0 dropping every Bitstamp message.
   `PatchedBitstampStreamingExchangeTest` fails once upstream is fixed; then remove the patch.
 - Kraken and Bitstamp streaming exchanges publish no instrument metadata; all pairs are subscribed.
-- Only one instance should run per InfluxDB bucket, or candles get overwritten.
+- **Clustering** (README "Running several instances"): every instance is a Hazelcast member, and
+  all instances sharing an InfluxDB bucket must form one cluster, or their candles overwrite each
+  other.
+  - Each pair is owned by one member (`Cluster.owns`), which alone builds its candles and archives
+    its prices. Anything new that writes per pair must check ownership too.
+  - Candle state is in the cluster maps (`Cluster.CANDLES`, ...), changed only through entry
+    processors (`ApplyPrice`, `RollForward`); keep the candle logic in pure `Candle` methods they
+    call.
+  - Every type stored in or sent through the cluster needs a compact serializer in
+    `CandleSerializers`, never Java serialization. Changing a format needs a full stop of every
+    instance, so say so in the commit.
+  - Hazelcast settings that reach outside the network stay off (`ClusterConfigTest`): phone-home,
+    auto-detection, multicast. Its JVM shutdown hook stays off, so Spring flushes candles first.
+  - Tests that start members use `TestClusters` (unique names, ports from 5901). Wait for
+    `isClusterSafe()` before relying on backups.
 - Real-time clients (SSE and the `/api/v1/ws/prices` WebSocket) both go through
   `PriceStreamService.open`, which owns rates (`StreamRate`), the subscriber limit, metrics and
   slow-client handling. Add new transports there rather than re-implementing throttling.

@@ -2,7 +2,9 @@
 
 Spring Boot service that streams real-time ticker data over WebSocket from several exchanges via
 [XChange](https://github.com/knowm/XChange) (`xchange-stream-*`), aggregates it per currency pair,
-serves it over REST, and archives snapshots in InfluxDB 2.x for later retrieval.
+serves it over REST, and archives snapshots in InfluxDB 2.x for later retrieval. Several
+instances form an embedded Hazelcast cluster, so losing one loses no candles (see
+[Running several instances](#running-several-instances)).
 
 ```
 exchange WebSockets ──► MarketStreamManager ──► QuoteBook (latest quote per exchange/pair)
@@ -14,7 +16,7 @@ exchange WebSockets ──► MarketStreamManager ──► QuoteBook (latest qu
                         PriceArchiver (every 5s) ◄─┘──► InfluxDB ──► REST /api/v1/history
 ```
 
-**Stack:** Java 21 · Spring Boot 4.1 · Gradle 9 (wrapper) · XChange 6.0 (streaming) · InfluxDB 2.7 · Lombok
+**Stack:** Java 21 · Spring Boot 4.1 · Gradle 9 (wrapper) · XChange 6.0 (streaming) · InfluxDB 2.7 · Hazelcast 5.5 · Lombok
 
 ## Running locally
 
@@ -97,7 +99,9 @@ java -jar build/libs/mds-0.0.1-SNAPSHOT.jar
 ### Troubleshooting
 
 - **`port 8080 is in use`**: another copy of mds may be running (for example from your IDE). Stop
-  it or use `SERVER_PORT`. Run only one instance per InfluxDB bucket, or OHLC candles get overwritten.
+  it or use `SERVER_PORT`. Instances sharing an InfluxDB bucket must form one cluster (see
+  [Running several instances](#running-several-instances)), or their OHLC candles overwrite each
+  other.
 - **An exchange shows `connected: false` or is missing from `/api/v1/exchanges`**: the exchange
   is unreachable or blocks your region; the log shows why. The others keep working.
 - **`InfluxDB did not become healthy`**: check `docker compose logs influxdb`. To start over with an
@@ -230,6 +234,11 @@ returned as RFC 9457 problem details; pairs that aren't subscribed return 404.
 | `mds.ohlc.zone` / `.flush-interval` | `MDS_OHLC_ZONE` | `UTC` / `10s` |
 | `mds.socks-proxy.host` / `.port` | `MDS_SOCKS_PROXY_HOST` / `MDS_SOCKS_PROXY_PORT` | blank (direct) / `1080` |
 | `mds.influx.url` / `token` / `org` / `bucket` | `MDS_INFLUX_*` | `http://localhost:8086` / `mds-dev-token` / `mds` / `prices` |
+| `mds.cluster.name` / `.port` | `MDS_CLUSTER_NAME` / `MDS_CLUSTER_PORT` | `mds` / `5701` (the next free port if taken) |
+| `mds.cluster.members` | `MDS_CLUSTER_MEMBERS` | blank = a cluster of one; else `host` or `host:port` of the instances |
+| `mds.cluster.kubernetes-service-dns` | `MDS_CLUSTER_KUBERNETES_SERVICE_DNS` | blank; a headless Service to find the pods |
+| `mds.cluster.rebalance.enabled` / `.interval` | `MDS_CLUSTER_REBALANCE_ENABLED` | `true` / `10s` |
+| `mds.cluster.rebalance.tolerance` / `.max-per-round` | | `0.2` (20% over the fair share) / `20` |
 | `logging.structured.format.console` | `MDS_LOG_FORMAT` | blank = readable text; `ecs` for ECS JSON in production |
 | `logging.structured.ecs.service.environment` | `MDS_ENVIRONMENT` | `local` |
 
@@ -261,7 +270,8 @@ connection** through a SOCKS5 proxy:
   via rescu, whose proxy type is set to SOCKS in `src/main/resources/rescu.properties`.
 
 Host names are resolved **by the proxy** (SOCKS5 with domain names), so the app needs neither
-direct internet access nor public DNS. InfluxDB and inbound API traffic are not proxied.
+direct internet access nor public DNS. InfluxDB, cluster (Hazelcast) and inbound API traffic are
+not proxied.
 
 ```bash
 MDS_SOCKS_PROXY_HOST=socks.internal MDS_SOCKS_PROXY_PORT=1080 scripts/dev.sh run
@@ -329,8 +339,9 @@ carried-forward candle. Only active sources are carried forward: the index and e
 series stops.
 
 Prices during downtime aren't recovered, so a candle spanning an outage reflects only what was
-seen while running. Run one instance per InfluxDB bucket: two instances would overwrite each
-other's candles.
+seen while running. To avoid downtime, run several instances as one cluster (see
+[Running several instances](#running-several-instances)); instances that don't share a cluster
+overwrite each other's candles.
 
 ```bash
 curl 'localhost:8080/api/v1/candles/BTC-USDT?period=week'
@@ -339,6 +350,101 @@ curl 'localhost:8080/api/v1/candles/ETH-USD/current?source=kraken'
 
 History accepts `from` / `to` (ISO-8601, candles whose period *starts* in the range) and `limit`;
 `from` defaults to 30 days, 26 weeks, 24 months or 10 years back.
+
+## Running several instances
+
+Run two or more instances against the same InfluxDB bucket, behind a load balancer, so that losing
+one loses no candles and doesn't disconnect every client for good. The instances form an embedded
+[Hazelcast](https://hazelcast.com/) cluster (5.5, Apache 2.0): each one is a member, so there's no
+separate cluster to run. One instance on its own is a cluster of one, and behaves as before.
+
+```
+                         load balancer (least connections)
+                     ┌────────────┼────────────┐
+ exchanges ──WS──►  mds A  ◄──Hazelcast──►  mds B  ◄──WS── exchanges   every instance streams
+                     │   pairs X, Y            │   pair Z               every exchange
+                     └──── candles, prices ────┴──────► InfluxDB
+```
+
+**How work is shared**
+
+- **Every instance streams every exchange** and serves its own SSE and WebSocket clients, so any
+  instance can serve any client. That's N connections per exchange for N instances; public market
+  data allows it.
+- **Each pair is owned by one instance** (the owner of the Hazelcast partition for the pair's
+  symbol). The owner builds all the pair's candles and archives its prices; the others ignore the
+  pair for candles and archiving. `GET /actuator/health` shows `cluster.details.ownedPairs` per
+  instance. Pairs are spread by hashing, so with only a few pairs one instance may own all of them:
+  this work is small, and the subscriber load, which isn't, is balanced separately (below).
+- **In-progress candles live in the cluster**, with a synchronous backup on another member. Prices
+  are applied by entry processors on the member that holds the candle, on a thread of their own, so
+  exchange connections never wait on the cluster.
+
+**When an instance fails**
+
+- Its pairs move to the members that hold their backups, which continue the same candles: open,
+  high, low and update counts carry on. Completed candles waiting to be written also survive.
+  Prices that arrive during the move, a second or two, may be missing from a candle's high and low.
+- If a pair's candles are lost from the cluster altogether (every instance stopped, two failed
+  together, or the cluster split), its new owner reloads them from InfluxDB first, as a single
+  instance does at startup. That loses at most one flush interval (`mds.ohlc.flush-interval`).
+- If the network splits the cluster, each part owns every pair and writes the same candles until
+  Hazelcast merges them again, which it checks for every 30 seconds. Both parts see every price, so
+  either version of a candle is complete. Alert on `mds.cluster.members` below the number of
+  instances you run.
+
+**Spreading subscribers**
+
+Long-lived SSE and WebSocket connections stay where they first landed, so after a scale-out or a
+restart some instances carry far more than others. Every `mds.cluster.rebalance.interval`, each
+instance publishes its subscription count. One with more than its fair share (total / instances)
+plus `tolerance` closes its newest subscriptions, down to the fair share and at most
+`max-per-round` at a time, then waits two intervals before deciding again
+([MDS-2003](docs/runbook.md#mds-2003)):
+
+- **SSE** clients get a `reconnect` event with `retry: 1000` and the stream ends; `EventSource`
+  reconnects by itself.
+- **WebSocket** clients get close code **1013** (try again later) and must reconnect and subscribe
+  again.
+
+Use **least-connections** balancing, so reconnects go to the quieter instances; no session
+stickiness is needed. Set `MDS_CLUSTER_REBALANCE_ENABLED=false` to keep clients where they are.
+
+**Deploying**
+
+| Where | Settings |
+|---|---|
+| VMs or containers with fixed addresses | `MDS_CLUSTER_MEMBERS=10.0.0.11,10.0.0.12` (the same list on every instance; `host:port` if not on `MDS_CLUSTER_PORT`) |
+| Kubernetes | a headless Service selecting the pods, port 5701, then `MDS_CLUSTER_KUBERNETES_SERVICE_DNS=mds-hz.<namespace>.svc.cluster.local`. Discovery uses DNS only, no Kubernetes API access. |
+
+- **Security:** cluster traffic is neither encrypted nor authenticated (that's in Hazelcast's paid
+  edition), so **only mds instances may reach the cluster port** (5701): use a firewall rule or a
+  Kubernetes NetworkPolicy. `MDS_CLUSTER_NAME` keeps clusters apart but isn't a secret. mds's own
+  data uses compact formats, never Java serialization, and Hazelcast's Java-serialization filter
+  allows only JDK and Hazelcast classes. Like InfluxDB traffic, cluster traffic isn't proxied.
+  Hazelcast's phone-home, cloud auto-detection and multicast are off, so the only connections are
+  to the configured members.
+- **Rolling deploys** work: instances leave and join one at a time, and their pairs move with their
+  candles. Stop instances gracefully (SIGTERM): the member hands its data over before it exits.
+- **`mds.decimal.*` and `mds.ohlc.zone` must match on every instance**, because the shared candles
+  depend on them. An instance that disagrees with the running cluster refuses to start
+  ([MDS-1009](docs/runbook.md#mds-1009)). To change them, stop every instance, then start them all
+  with the new values.
+- Candle formats in the cluster carry a schema. A release that changes one says so; deploy it by
+  stopping every instance rather than rolling.
+
+**Two instances locally**
+
+```bash
+scripts/dev.sh infra
+./gradlew bootJar
+JAR=$(ls build/libs/mds-*.jar | grep -v plain)
+java -jar "$JAR" --mds.cluster.members=127.0.0.1 &
+java -jar "$JAR" --mds.cluster.members=127.0.0.1 --server.port=8081 &
+curl -s localhost:8081/actuator/health    # components.cluster: members 2, ownedPairs
+```
+
+Without a port, each instance tries 5701 and the next two, and listens on the first free one.
 
 ## Decimal precision
 
@@ -393,6 +499,8 @@ Micrometer meters, visible at `/actuator/metrics/{name}` and tagged `application
 | `mds.influx.query.rows` | distribution | `measurement` |
 | `mds.stream.subscribers` | gauge | `transport` (`sse`/`websocket`) |
 | `mds.stream.events` | counter | `pair`, `transport` |
+| `mds.stream.rebalanced` | counter | subscriptions closed so their clients reconnect to a quieter instance |
+| `mds.cluster.members` | gauge | instances in the cluster, this one included |
 
 ```bash
 curl 'localhost:8080/actuator/metrics/http.server.requests?tag=uri:/api/v1/prices/{pair}'
@@ -419,13 +527,15 @@ as the candle changes. The compose bucket has infinite retention.
 
 ```
 com.mds
+├── cluster/       Hazelcast member (ClusterConfig), Cluster (pair ownership, shared maps), health
 ├── config/        properties, InfluxDB client, clock, decimal precision, SSE executor, lifecycle logging
 ├── logging/       LogEvent catalogue, EventLog, LogFields, RequestIds
 ├── exchange/      SupportedExchange, MarketStreamManager (WebSocket lifecycle), stream health check
 ├── math/          Decimal (fixed-point) and its JSON serializer
 ├── model/         MarketPair, PriceQuote, AggregatedPrice, Candle, CandlePeriod, ExchangeStatus, history rows
 ├── service/       QuoteBook (live quotes), PriceService, PriceAggregator, PriceArchiver (@Scheduled),
-│                  PriceStreamService (SSE/WebSocket subscriptions + rates), CandleService (OHLC)
+│                  PriceStreamService (SSE/WebSocket subscriptions + rates), StreamRebalancer,
+│                  CandleService (OHLC) with its cluster keys, entry processors and serializers
 ├── persistence/   PriceRepository (Flux queries), InfluxHealthIndicator
 └── web/           REST and SSE controllers, PriceWebSocketHandler, ApiExceptionHandler, RequestIdFilter
 ```
@@ -447,8 +557,11 @@ request as the code.
 | **Immutable records, with methods that return new values** (`PriceQuote.mergedWith`, `Candle.with`). | Quotes arrive on several exchange I/O threads at once. Immutable values can be shared without locks, and `ConcurrentHashMap.merge`/`compute` replaces one per key atomically. | One short-lived object per update, which young-generation GC handles cheaply. |
 | **Latest-value throttling per subscriber** (`throttleLatest`, `BackpressureStrategy.LATEST`, `observeOn` with a buffer of 1, a virtual thread per send). | Each client gets its own rate. A slow one is sent the newest state when it catches up and never holds a queue; WebSocket sends are capped at 512 KB, after which the client is disconnected. | A fast-changing pair is sampled, not replayed, for throttled clients. |
 | **One subscription path for every transport** (`PriceStreamService.open` takes a `PriceListener` callback). | Rates, the subscriber limit, metrics and slow-client handling live in one place; SSE and WebSocket only format and send. | Transports can't change throttling behaviour independently. |
+| **An embedded Hazelcast cluster, with each pair owned by one member.** In-progress candles live in a cluster map with a synchronous backup; the pair's owner applies its prices with entry processors and writes its candles. Every instance still streams every exchange. | Losing an instance loses no candles, and none are counted or written twice. Any instance can serve any client, and there's no separate cluster to run. | N exchange connections for N instances. Cluster traffic needs a private network (no TLS in the open-source edition). Decimal precision and candle zone must match cluster-wide. |
+| **Per-pair reload when the cluster lacks a pair's candles**, tracked by a marker that lives in the pair's partition. | The marker is lost together with the candles, so every way of losing them (cluster start, double failure, split) ends in a reload from InfluxDB instead of fresh candles overwriting stored ones. | One InfluxDB query per pair whenever ownership lands on a member without the state. |
+| **Rebalance subscribers by closing the newest** above the fair share, with a cool-down. | Long-lived connections don't move by themselves; shedding the newest disturbs established clients least, and the cool-down stops it shedding again before the reconnects are counted. | Clients must reconnect: SSE does by itself, WebSocket clients must handle close code 1013. |
 | **One InfluxDB boundary** (`PriceRepository`). | Every Flux query is in one class, where interpolated values are checked and every call is timed. | Large for a single class, but it splits naturally by measurement if it grows. |
-| **Ordered lifecycles** (`SmartLifecycle` phases). | `CandleService` reloads candles before the first tick and flushes after the last; `MarketStreamManager` connects in between. | Startup order lives in phase numbers, so it's documented on the beans. |
+| **Ordered lifecycles** (`SmartLifecycle` phases). | `CandleService` loads candles before the first tick and flushes after the last; `MarketStreamManager` connects in between. Spring stops the Hazelcast member after both, so the final flush still reaches the cluster. | Startup order lives in phase numbers, so it's documented on the beans. |
 | **Fail-closed proxy.** Startup is refused if exchange REST calls wouldn't use SOCKS. | It's a security requirement: a misconfiguration must not leak traffic around the proxy. | An XChange upgrade that changes its proxy handling can't be merged until `SocksProxyTest` passes. |
 | **`Optional` for an expected absence, exceptions for failures.** `PriceService.current` is empty while no exchange has a fresh price; `aggregate` throws `PriceUnavailableException` for REST, which maps it to 503. | "No price yet" is routine at startup and for quiet pairs. Streams and candles check it on every update, where throwing would capture a stack trace each time. | Two methods for one computation. |
 | **Injected `Clock`.** | Tests control time (staleness, period boundaries, throttling with `TestScheduler`). | Every time-dependent bean takes a constructor argument. |
@@ -462,6 +575,8 @@ request as the code.
 | Facade | `PriceService` over `QuoteBook`, `MarketStreamManager` and `PriceAggregator` | Controllers, streams and candles ask one question ("the aggregate for this pair") without assembling it. |
 | Functional core, imperative shell | `PriceAggregator` (pure) inside `PriceService` (clock and state) | The statistics are tested with plain lists, without mocks or time. |
 | Repository | `PriceRepository` | One place for storage access, query validation and storage metrics. |
+| Facade | `Cluster` over Hazelcast | Services ask "do I own this pair?" and get maps, without Hazelcast's partition and membership APIs. |
+| Command (entry processor) | `ApplyPrice`, `RollForward` | The change travels to the data, runs atomically on the member that holds it, and replays on the backup; the functions themselves are pure methods on `Candle`. |
 | Anti-corruption layer | `QuoteBook` (XChange `BigDecimal` → `Decimal`), `PatchedBitstampStreamingExchange` | Library types and bugs stop at the boundary. The patch has a guard test that fails once upstream is fixed. |
 | Enum with behaviour | `CandlePeriod` (`start`/`end` per period), `SupportedExchange`, `LogEvent` | Closed sets with a `switch` instead of a class hierarchy; call sites stay monomorphic. |
 | Catalogue and fluent builder | `LogEvent.X.at(log).with(...).log()` | Every operational line has a stable code, level and SOP link, and call sites read as one sentence. |
@@ -506,8 +621,10 @@ The split stops where a name would only restate a line of code.
 ### Performance: JIT and GC
 
 The hot paths, in order of volume:
-1. **Every tick:** `QuoteBook.onTicker` and `CandleService.onUpdate`. That's tens per second
-   across exchanges.
+1. **Every tick:** `QuoteBook.onTicker`, and on the pair's owner `CandleService.onUpdate`. That's
+   tens per second across exchanges. The owner runs eight entry processors per tick (four
+   periods, for the exchange and the index), each a local call plus a synchronous backup, on the
+   candle thread rather than an exchange's I/O thread.
 2. **Every change × every subscriber:** `PriceService.current`, `PriceAggregator` and JSON
    serialisation.
 3. **Every flush or snapshot:** `CandleService.flush` and `PriceRepository` writes.
