@@ -33,6 +33,33 @@ public final class SsmConfigData {
     private SsmConfigData() {
     }
 
+    /** Every parameter under the configured path, as properties. */
+    static Map<String, Object> read(SsmSettings settings) {
+        try (SsmClient client = client(settings)) {
+            return new ParameterStore(client).read(settings.path());
+        }
+    }
+
+    /** The name of the property source holding them, e.g. {@code mds-ssm:/mds/prod/}. */
+    static String sourceName(SsmSettings settings) {
+        return PREFIX + settings.path();
+    }
+
+    private static SsmClient client(SsmSettings settings) {
+        SsmClientBuilder builder = SsmClient.builder()
+                .httpClientBuilder(UrlConnectionHttpClient.builder()
+                        .connectionTimeout(settings.timeout()).socketTimeout(settings.timeout()))
+                .overrideConfiguration(ClientOverrideConfiguration.builder()
+                        .apiCallTimeout(settings.timeout()).build());
+        if (!settings.region().isEmpty()) {
+            builder.region(Region.of(settings.region()));
+        }
+        if (!settings.endpoint().isEmpty()) {
+            builder.endpointOverride(URI.create(settings.endpoint()));
+        }
+        return builder.build();
+    }
+
     /** The path to read, from {@code mds.ssm.*} as known when imports are resolved. */
     static final class Resource extends ConfigDataResource {
 
@@ -58,7 +85,7 @@ public final class SsmConfigData {
 
         @Override
         public String toString() {
-            return PREFIX + settings.path();
+            return sourceName(settings);
         }
     }
 
@@ -81,28 +108,12 @@ public final class SsmConfigData {
         @Override
         public ConfigData load(ConfigDataLoaderContext context, Resource resource) {
             SsmSettings settings = resource.settings();
-            try (SsmClient client = client(settings)) {
-                Map<String, Object> properties = new ParameterStore(client).read(settings.path());
-                return new ConfigData(List.of(new MapPropertySource(PREFIX + settings.path(), properties)));
+            try {
+                return new ConfigData(List.of(new MapPropertySource(sourceName(settings), read(settings))));
             } catch (RuntimeException e) {
                 throw new IllegalStateException("%s: AWS SSM Parameter Store path %s: %s"
                         .formatted(LogEvent.CONFIG_LOAD_FAILED.message(), settings.path(), e.getMessage()), e);
             }
-        }
-
-        private static SsmClient client(SsmSettings settings) {
-            SsmClientBuilder builder = SsmClient.builder()
-                    .httpClientBuilder(UrlConnectionHttpClient.builder()
-                            .connectionTimeout(settings.timeout()).socketTimeout(settings.timeout()))
-                    .overrideConfiguration(ClientOverrideConfiguration.builder()
-                            .apiCallTimeout(settings.timeout()).build());
-            if (!settings.region().isEmpty()) {
-                builder.region(Region.of(settings.region()));
-            }
-            if (!settings.endpoint().isEmpty()) {
-                builder.endpointOverride(URI.create(settings.endpoint()));
-            }
-            return builder.build();
         }
     }
 }

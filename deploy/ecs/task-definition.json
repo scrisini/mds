@@ -17,6 +17,7 @@
         { "name": "hazelcast", "containerPort": 5701, "protocol": "tcp" }
       ],
       "environment": [
+        { "name": "MDS_MODE", "value": "production" },
         { "name": "MDS_ENVIRONMENT", "value": "prod" },
         { "name": "MDS_LOG_FORMAT", "value": "ecs" },
         { "name": "MDS_CLUSTER_KUBERNETES_SERVICE_DNS", "value": "mds-hz.mds.internal" },
@@ -27,6 +28,8 @@
         { "name": "MDS_VAULT_APP_ROLE_ID", "value": "CHANGE" },
         { "name": "MDS_VAULT_APP_ROLE_SECRET_ID_FILE", "value": "/run/secrets/vault-secret-id" },
         { "name": "MDS_VAULT_PATH", "value": "mds/prod" },
+        { "name": "MDS_STREAM_ALLOWED_ORIGINS", "value": "https://app.example.com" },
+        { "name": "MDS_STREAM_ALLOW_UNTHROTTLED", "value": "false" },
         { "name": "BPL_JAVA_NMT_ENABLED", "value": "false" }
       ],
       "stopTimeout": 60,

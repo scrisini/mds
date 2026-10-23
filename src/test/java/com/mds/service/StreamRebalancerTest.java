@@ -99,7 +99,7 @@ class StreamRebalancerTest {
                         Duration.ofMinutes(30), 10, true, List.of("*"), Duration.ofSeconds(30)),
                 new MdsProperties.DecimalSettings(8, RoundingMode.HALF_EVEN),
                 new MdsProperties.Ohlc(ZoneOffset.UTC, Duration.ofSeconds(10)),
-                new MdsProperties.SocksProxy("", 1080), settings);
+                new MdsProperties.SocksProxy("", 1080), settings, MdsProperties.Mode.DEVELOPMENT);
         return new StreamRebalancer(streams, cluster, properties, registry);
     }
 }

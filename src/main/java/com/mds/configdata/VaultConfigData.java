@@ -27,6 +27,11 @@ public final class VaultConfigData {
     private VaultConfigData() {
     }
 
+    /** The name of the property source holding the secret, e.g. {@code mds-vault:secret/mds/prod}. */
+    static String sourceName(VaultSettings settings) {
+        return PREFIX + settings.kvMount() + "/" + settings.path();
+    }
+
     /** The secret to read, from {@code mds.vault.*} as known when imports are resolved. */
     static final class Resource extends ConfigDataResource {
 
@@ -52,7 +57,7 @@ public final class VaultConfigData {
 
         @Override
         public String toString() {
-            return PREFIX + settings.kvMount() + "/" + settings.path();
+            return sourceName(settings);
         }
     }
 

@@ -4,7 +4,10 @@ import java.math.RoundingMode;
 import java.time.Duration;
 import java.time.ZoneId;
 import java.util.List;
+import java.util.Locale;
 
+import com.mds.math.Decimal;
+import com.mds.model.MarketPair;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 import org.springframework.boot.context.properties.bind.DefaultValue;
 
@@ -22,6 +25,7 @@ import org.springframework.boot.context.properties.bind.DefaultValue;
  * @param ohlc              OHLC candle settings
  * @param socksProxy        SOCKS5 proxy for all outgoing exchange traffic
  * @param cluster           Hazelcast cluster that shares candles and balances subscribers across instances
+ * @param mode              {@code production} refuses settings that are unsafe there ({@link ProductionSafeguards})
  */
 @ConfigurationProperties("mds")
 public record MdsProperties(
@@ -35,7 +39,24 @@ public record MdsProperties(
         @DefaultValue DecimalSettings decimal,
         @DefaultValue Ohlc ohlc,
         @DefaultValue SocksProxy socksProxy,
-        @DefaultValue Cluster cluster) {
+        @DefaultValue Cluster cluster,
+        @DefaultValue("development") Mode mode) {
+
+    /** Fails binding, not a later bean, on a malformed pair, so a check of stored settings sees it too. */
+    public MdsProperties {
+        pairs.forEach(MarketPair::parse);
+    }
+
+    /** Where the instance runs. Production refuses unsafe settings; development allows local defaults. */
+    public enum Mode {
+        DEVELOPMENT, PRODUCTION;
+
+        /** As configured and shown: {@code development}, {@code production}. */
+        @Override
+        public String toString() {
+            return name().toLowerCase(Locale.ROOT);
+        }
+    }
 
     /**
      * @param enabled  whether snapshots of the live quotes are written to InfluxDB
@@ -88,6 +109,13 @@ public record MdsProperties(
     public record DecimalSettings(
             @DefaultValue("8") int scale,
             @DefaultValue("HALF_EVEN") RoundingMode rounding) {
+
+        public DecimalSettings {
+            if (scale < 0 || scale > Decimal.MAX_SCALE) {
+                throw new IllegalArgumentException(
+                        "mds.decimal.scale must be between 0 and %d, was %d".formatted(Decimal.MAX_SCALE, scale));
+            }
+        }
     }
 
     /**
