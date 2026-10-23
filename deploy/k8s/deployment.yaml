@@ -48,6 +48,8 @@ spec:
               containerPort: 8080
             - name: hazelcast
               containerPort: 5701
+            - name: grpc
+              containerPort: 9090
           envFrom:
             - configMapRef:
                 name: mds-env

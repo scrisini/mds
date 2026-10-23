@@ -17,6 +17,23 @@ spring:
     # container's stop timeout must cover it; see docs/deployment.md "Timeouts".
     timeout-per-shutdown-phase: 30s
 
+  grpc:
+    server:
+      # The MarketData gRPC API on its own port (HTTP/2), not through Tomcat (README "gRPC API")
+      port: ${MDS_GRPC_PORT:9090}
+      servlet:
+        enabled: false
+      shutdown:
+        # streams end first (MDS-1014); the rest of in-flight calls get this long
+        grace-period: 30s
+      health:
+        # the standard grpc.health.v1 service follows readiness only, like the HTTP probe: an
+        # InfluxDB outage mustn't take every instance out of the load balancer
+        include-overall-health: false
+        service:
+          "[mds.v1.MarketData]":
+            include: readinessState
+
 server:
   port: 8080
   # On SIGTERM: stop accepting, let in-flight requests finish, then stop (the default, made explicit).
@@ -42,7 +59,11 @@ mds:
   archive:
     enabled: true
     interval: ${MDS_ARCHIVE_INTERVAL:5s}
-  # Real-time subscriptions (SSE and WebSocket)
+  # auto | gzip | none: gzip for gRPC responses when the client accepts it. auto = only responses
+  # with quotes, the only ones gzip makes smaller (README "gRPC API")
+  grpc:
+    compression: ${MDS_GRPC_COMPRESSION:auto}
+  # Real-time subscriptions (SSE, WebSocket and gRPC)
   stream:
     default-throttle: 1s        # when a client asks for no rate
     min-throttle: 100ms         # also caps rate=N at 10 updates per second

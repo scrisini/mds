@@ -5,6 +5,8 @@ kind: Ingress
 metadata:
   name: mds
   annotations:
+    # one ALB for HTTP and gRPC: ingress-grpc.yaml joins the same group
+    alb.ingress.kubernetes.io/group.name: mds
     alb.ingress.kubernetes.io/scheme: internet-facing
     alb.ingress.kubernetes.io/target-type: ip
     alb.ingress.kubernetes.io/listen-ports: '[{"HTTP": 80}, {"HTTPS": 443}]'

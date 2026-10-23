@@ -14,6 +14,7 @@ import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Supplier;
 
 import com.mds.cluster.Cluster;
+import com.mds.config.GrpcProperties;
 import com.mds.config.InfluxProperties;
 import com.mds.config.MdsProperties;
 import com.mds.config.ProductionSafeguards;
@@ -194,6 +195,7 @@ public class ConfigCheck implements HealthIndicator {
         try {
             next = binder.bindOrCreate("mds", MdsProperties.class);
             binder.bindOrCreate("mds.influx", InfluxProperties.class);
+            binder.bindOrCreate("mds.grpc", GrpcProperties.class);
             binder.bindOrCreate("mds.ssm", SsmSettings.class);
             binder.bindOrCreate("mds.vault", VaultSettings.class);
         } catch (BindException e) {

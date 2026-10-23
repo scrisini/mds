@@ -27,6 +27,8 @@ scripts/dev.sh hooks           # install the commit-msg hook (do this once per c
 scripts/test-commit-msg.sh     # test the hook after changing it or .commitlintrc.json
 scripts/check-secrets.sh --all # scan tracked files for plaintext secrets (the hook scans staged files)
 scripts/test-check-secrets.sh  # test the secrets check after changing it
+node scripts/load-sse.mjs <subscribers> <rate> <seconds>          # SSE load, for README "Capacity"
+./gradlew grpcLoad -Pargs="<subscribers> <rate> <seconds> ..."    # gRPC load, for README "Capacity"
 ```
 
 See README "Running locally" for prerequisites and all `scripts/dev.sh` commands. Never run
@@ -43,6 +45,8 @@ com.mds
 │                 ConfigCheck: re-reads them and checks a restart would succeed (/actuator/configcheck)
 ├── logging/      LogEvent catalogue, EventLog, LogFields, RequestIds: logs for production support
 ├── exchange/     SupportedExchange, MarketStreamManager (WebSocket lifecycle), Bitstamp patch
+├── grpc/         MarketDataService (the gRPC API), PriceStream, PriceMessages, GrpcErrors, GrpcRequestIds;
+│                 stubs generated from src/main/proto into com.mds.grpc.v1
 ├── math/         Decimal fixed-point type and its JSON serializer
 ├── model/        immutable records: MarketPair, PriceQuote, AggregatedPrice, Candle, …
 ├── service/      QuoteBook, PriceService, PriceAggregator, PriceArchiver, PriceStreamService, StreamRebalancer,
@@ -153,11 +157,21 @@ com.mds
     auto-detection, multicast. Its JVM shutdown hook stays off, so Spring flushes candles first.
   - Tests that start members use `TestClusters` (unique names, ports from 5901). Wait for
     `isClusterSafe()` before relying on backups.
-- Real-time clients (SSE and the `/api/v1/ws/prices` WebSocket) both go through
+- Real-time clients (SSE, the `/api/v1/ws/prices` WebSocket and gRPC `StreamPrices`) all go through
   `PriceStreamService.open`, which owns rates (`StreamRate`), the subscriber limit, metrics,
   heartbeats and slow-client handling. Add new transports there rather than re-implementing throttling.
   `WebSocketSession` isn't thread-safe: send only through the `ConcurrentWebSocketSessionDecorator`
-  in `PriceWebSocketHandler`.
+  in `PriceWebSocketHandler`; a gRPC stream sends only through its `PriceStream`, which also holds
+  back events until every subscription of the request is open and keeps only the latest per pair
+  while the client isn't reading.
+- **gRPC contract** (`src/main/proto/mds/v1/market_data.proto`, served on port 9090 by Spring
+  Boot's gRPC server, not through Tomcat): add fields with new numbers; never renumber, reuse or
+  change the type of one, and mark removed numbers `reserved`. Anything else that breaks a generated
+  client is a breaking API change (`feat(api)!`), or goes in `mds.v2`. Numbers are `Decimal` units with
+  the scale (`PriceMessages`), never strings or doubles. Domain exceptions map to statuses in
+  `GrpcErrors`, like `ApiExceptionHandler` for HTTP. The gRPC server stops in the same lifecycle
+  phase as `PriceStreamService`, so `MarketDataService` ends its streams on
+  `GrpcServerShutdownEvent`, before the server waits for calls.
 - **Outgoing traffic must honour `mds.socks-proxy`** (a security requirement where it's used).
   Exchange connections get it from `MarketStreamManager.configure`; never add an HTTP client or
   socket to an external host that bypasses it. `SocksProxyTest` runs every `SupportedExchange`

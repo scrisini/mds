@@ -7,6 +7,7 @@ import org.springframework.core.env.ConfigurableEnvironment;
 import org.springframework.core.env.EnumerablePropertySource;
 import org.springframework.core.env.PropertySource;
 import org.springframework.context.event.EventListener;
+import org.springframework.grpc.server.lifecycle.GrpcServerStartedEvent;
 import org.springframework.stereotype.Component;
 
 /** Logs lifecycle events from the catalogue, so support can see when an instance became ready. */
@@ -26,6 +27,11 @@ class LifecycleLogging {
         logExternalConfiguration(environment);
         Integer port = environment.getProperty("local.server.port", Integer.class);
         LogEvent.SERVICE_STARTED.at(log).with("port", port).with("mode", properties.mode()).log();
+    }
+
+    @EventListener
+    void grpcStarted(GrpcServerStartedEvent event) {
+        LogEvent.GRPC_SERVER_STARTED.at(log).with("port", event.getPort()).log();
     }
 
     /**

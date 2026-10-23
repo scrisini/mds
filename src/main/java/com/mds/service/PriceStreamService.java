@@ -48,7 +48,7 @@ import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
  * every change. Either way, a client that can't keep up is sent the latest aggregate when it
  * catches up, never a backlog.
  *
- * <p>Metrics, all tagged {@code transport} ({@code sse}/{@code websocket}):
+ * <p>Metrics, all tagged {@code transport} ({@code sse}/{@code websocket}/{@code grpc}):
  * <ul>
  *   <li>{@code mds.stream.subscribers} gauge, and {@code mds.stream.events} counter (also tagged {@code pair});</li>
  *   <li>{@code mds.stream.latency} timer: from receiving the newest exchange update an event reflects to
@@ -71,6 +71,7 @@ public class PriceStreamService implements SmartLifecycle {
 
     public static final String SSE = "sse";
     public static final String WEBSOCKET = "websocket";
+    public static final String GRPC = "grpc";
     /** Stops before {@link MarketStreamManager#PHASE}, while prices still flow. */
     public static final int PHASE = DEFAULT_PHASE;
 
@@ -105,7 +106,7 @@ public class PriceStreamService implements SmartLifecycle {
         this.throttleScheduler = throttleScheduler;
         this.sendScheduler = sendScheduler;
         this.heartbeats = ticker(settings.heartbeat(), throttleScheduler);
-        for (String transport : new String[] {SSE, WEBSOCKET}) {
+        for (String transport : new String[] {SSE, WEBSOCKET, GRPC}) {
             AtomicInteger count = new AtomicInteger();
             subscribersByTransport.put(transport, count);
             Gauge.builder("mds.stream.subscribers", count, AtomicInteger::get)
