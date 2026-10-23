@@ -5,10 +5,11 @@
 #   scripts/dev.sh check            verify prerequisites
 #   scripts/dev.sh infra            start InfluxDB (Docker) and wait until it is healthy
 #   scripts/dev.sh run [args...]    check, start InfluxDB, then run the app in the foreground
+#   scripts/dev.sh docker [--build] start InfluxDB and mds in Docker (builds the image if missing)
 #   scripts/dev.sh status           show InfluxDB and app health
 #   scripts/dev.sh test             run the test suite
-#   scripts/dev.sh stop             stop InfluxDB, keeping its data
-#   scripts/dev.sh reset [--yes]    stop InfluxDB and delete all of its data
+#   scripts/dev.sh stop             stop InfluxDB (and mds in Docker), keeping the data
+#   scripts/dev.sh reset [--yes]    stop the containers and delete all InfluxDB data
 #   scripts/dev.sh hooks            install the git hooks in .githooks (commit messages, plaintext secrets)
 #
 # Extra arguments to `run` are passed to Spring Boot, e.g.
@@ -32,6 +33,7 @@ MIN_JAVA=17
 SOCKS_HOST="${MDS_SOCKS_PROXY_HOST:-}"
 SOCKS_PORT="${MDS_SOCKS_PROXY_PORT:-1080}"
 LOCAL_SECRETS="config/secrets/local.enc.env"
+MDS_IMAGE="${MDS_IMAGE:-mds:local}"
 
 if [ -t 1 ]; then
     RED=$'\033[31m'; GREEN=$'\033[32m'; YELLOW=$'\033[33m'; BOLD=$'\033[1m'; RESET=$'\033[0m'
@@ -210,6 +212,34 @@ cmd_run() {
     exec "${app[@]}"
 }
 
+# mds in a container next to InfluxDB, configured by config/docker.env (docker-compose.yml)
+cmd_docker() {
+    if [ "${1:-}" = "--build" ] || ! docker image inspect "$MDS_IMAGE" >/dev/null 2>&1; then
+        step "Building image $MDS_IMAGE (buildpacks; the first build downloads them)"
+        ./gradlew bootBuildImage --console=plain --imageName="$MDS_IMAGE"
+    fi
+    if listening "$APP_PORT"; then
+        die "port $APP_PORT is in use (mds from the IDE?); stop it, or set SERVER_PORT for another host port"
+    fi
+    step "Starting InfluxDB and mds in Docker (network mds)"
+    MDS_IMAGE="$MDS_IMAGE" MDS_HTTP_PORT="$APP_PORT" docker compose --profile app up -d
+    printf '    waiting for http://localhost:%s/actuator/health/readiness ' "$APP_PORT"
+    local _
+    for _ in $(seq 1 90); do
+        if curl -fsS --max-time 2 "http://localhost:$APP_PORT/actuator/health/readiness" >/dev/null 2>&1; then
+            printf '%sready%s\n' "$GREEN" "$RESET"
+            ok "mds: http://localhost:$APP_PORT, logs: docker compose logs -f mds"
+            ok "InfluxDB UI: $LOCAL_INFLUX_URL (admin / admin-password)"
+            return
+        fi
+        printf '.'
+        sleep 1
+    done
+    printf '\n'
+    docker compose logs --tail 30 mds >&2 || true
+    die "mds did not become ready within 90s"
+}
+
 cmd_status() {
     step "Status"
     if curl -fsS --max-time 3 "$INFLUX_URL/health" >/dev/null 2>&1; then
@@ -228,8 +258,8 @@ cmd_status() {
 }
 
 cmd_stop() {
-    step "Stopping InfluxDB (data is kept)"
-    docker compose stop
+    step "Stopping InfluxDB and mds containers (data is kept)"
+    docker compose --profile app stop
 }
 
 cmd_reset() {
@@ -242,8 +272,8 @@ cmd_reset() {
             *) die "aborted" ;;
         esac
     fi
-    step "Removing InfluxDB container and data volumes"
-    docker compose down --volumes
+    step "Removing the containers and InfluxDB data volumes"
+    docker compose --profile app down --volumes
 }
 
 cmd_hooks() {
@@ -260,7 +290,7 @@ cmd_test() {
 }
 
 usage() {
-    sed -n '3,20p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '3,22p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 command="${1:-help}"
@@ -269,6 +299,7 @@ case "$command" in
     check)  cmd_check ;;
     infra)  cmd_infra ;;
     run)    cmd_run "$@" ;;
+    docker) cmd_docker "$@" ;;
     status) cmd_status ;;
     stop)   cmd_stop ;;
     reset)  cmd_reset "$@" ;;
