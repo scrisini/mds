@@ -29,6 +29,7 @@ exchange WebSockets ──► MarketStreamManager ──► QuoteBook (latest qu
 | **Free ports** 8080 and 8086 | App and InfluxDB | Change the app port with `SERVER_PORT`. |
 | **Outbound internet** | Exchange WebSockets and metadata | Direct, or through a SOCKS5 proxy ([Outgoing proxy](#outgoing-proxy-socks5)). Unreachable exchanges are skipped. Binance blocks the US; use `MDS_EXCHANGES=binanceus,kraken,…` there. |
 | `curl`, `bash` | Helper script | Preinstalled on macOS and most Linux distributions. |
+| `sops`, `age` (optional) | Encrypted secrets in `config/secrets/` | Only if the repository has `config/secrets/local.enc.env`: `brew install sops age`, then [set up a key](#secrets-in-git-sops). |
 
 Gradle itself comes from the wrapper (`./gradlew`), so it doesn't need installing, and neither do the
 dependencies (downloaded on first build, which needs a few minutes and internet access).
@@ -216,7 +217,9 @@ returned as RFC 9457 problem details; pairs that aren't subscribed return 404.
 
 ## Configuration
 
-`src/main/resources/application.yml`; the main keys can be overridden by environment variable:
+`src/main/resources/application.yml`; the main keys can be overridden by environment variable.
+Deployed environments take their settings from AWS SSM Parameter Store and their secrets from Vault
+(see [Configuration and secrets](#configuration-and-secrets)).
 
 | Property | Env | Default |
 |---|---|---|
@@ -233,7 +236,9 @@ returned as RFC 9457 problem details; pairs that aren't subscribed return 404.
 | `mds.decimal.scale` / `.rounding` | `MDS_DECIMAL_SCALE` / `MDS_DECIMAL_ROUNDING` | `8` / `HALF_EVEN` |
 | `mds.ohlc.zone` / `.flush-interval` | `MDS_OHLC_ZONE` | `UTC` / `10s` |
 | `mds.socks-proxy.host` / `.port` | `MDS_SOCKS_PROXY_HOST` / `MDS_SOCKS_PROXY_PORT` | blank (direct) / `1080` |
-| `mds.influx.url` / `token` / `org` / `bucket` | `MDS_INFLUX_*` | `http://localhost:8086` / `mds-dev-token` / `mds` / `prices` |
+| `mds.influx.url` / `token` / `org` / `bucket` | `MDS_INFLUX_*` | `http://localhost:8086` / `mds-dev-token` (local only; from Vault when deployed) / `mds` / `prices` |
+| `mds.ssm.path` / `.region` / `.endpoint` | `MDS_SSM_PATH` / `MDS_SSM_REGION` / `MDS_SSM_ENDPOINT` | blank = off; see [Configuration and secrets](#configuration-and-secrets) |
+| `mds.vault.*` | `MDS_VAULT_*` | blank address = off; see [HashiCorp Vault](#hashicorp-vault) |
 | `mds.cluster.name` / `.port` | `MDS_CLUSTER_NAME` / `MDS_CLUSTER_PORT` | `mds` / `5701` (the next free port if taken) |
 | `mds.cluster.members` | `MDS_CLUSTER_MEMBERS` | blank = a cluster of one; else `host` or `host:port` of the instances |
 | `mds.cluster.kubernetes-service-dns` | `MDS_CLUSTER_KUBERNETES_SERVICE_DNS` | blank; a headless Service to find the pods |
@@ -259,6 +264,109 @@ entry in `SupportedExchange`.
   subscribed; unlisted ones simply never update.
 - `volume` is whatever each exchange's stream reports (mostly 24h base volume; KuCoin's is the last
   trade size), so VWAP is indicative.
+
+## Configuration and secrets
+
+Settings come from four places, and a later one overrides an earlier one:
+
+| Order | Source | Holds | Set up with |
+|---|---|---|---|
+| 1 | `application.yml` | defaults, for local development | in the repository |
+| 2 | **AWS SSM Parameter Store** | an environment's non-secret settings | `MDS_SSM_PATH=/mds/prod/` |
+| 3 | **HashiCorp Vault** | the environment's secrets (today: `mds.influx.token`) | `MDS_VAULT_ADDRESS`, `MDS_VAULT_AUTH`, … |
+| 4 | environment variables, then command-line arguments | overrides, e.g. during an incident | as usual |
+
+Parameter Store and Vault are read **once at startup**, before anything else runs; a change takes
+effect at the next start (a rolling restart). Both are off until configured, so local runs need
+neither. Once configured, they **fail closed**: if one can't be read, the instance refuses to start
+([MDS-1013](docs/runbook.md#mds-1013)) rather than run on defaults or without its secrets. At
+startup the log names the path and the number of keys loaded
+([MDS-1011](docs/runbook.md#mds-1011), [MDS-1012](docs/runbook.md#mds-1012)), never the values.
+
+Both are reached **directly**, like InfluxDB: Parameter Store through a VPC endpoint, Vault on the
+private network. They don't go through the outbound proxy.
+
+### AWS SSM Parameter Store
+
+Each parameter under the path is a property: `/mds/prod/mds/pairs` (or `/mds/prod/mds.pairs`) sets
+`mds.pairs`. StringList values work for lists.
+
+```bash
+aws ssm put-parameter --name /mds/prod/mds/pairs --type StringList --value "BTC/USDT,ETH/USDT"
+aws ssm put-parameter --name /mds/prod/mds/stream/max-subscribers --type String --value 2000
+```
+
+- **Credentials and region** come from the AWS SDK's default chain: IRSA on EKS, the ECS task role,
+  an instance profile, or `AWS_*` variables. Set `MDS_SSM_REGION` to override the region.
+- **IAM policy:** `ssm:GetParametersByPath` on `arn:aws:ssm:<region>:<account>:parameter/mds/prod/*`
+  (plus `kms:Decrypt` if you use SecureString).
+- **Endpoint:** `MDS_SSM_ENDPOINT` for a VPC endpoint URL, or LocalStack in development.
+- Keep secrets out of Parameter Store; they belong in Vault.
+
+### HashiCorp Vault
+
+mds reads one secret from the key/value engine (v2 by default): each key is a property name.
+
+```bash
+vault kv put secret/mds/prod mds.influx.token=…
+```
+
+| Setting | Env | Default |
+|---|---|---|
+| `mds.vault.address` | `MDS_VAULT_ADDRESS` | blank = off. https only; http is accepted for localhost |
+| `mds.vault.kv-mount` / `.path` / `.kv-version` | `MDS_VAULT_KV_MOUNT` / `MDS_VAULT_PATH` | `secret` / `mds` / `2` |
+| `mds.vault.namespace` | `MDS_VAULT_NAMESPACE` | blank (Vault Enterprise only) |
+| `mds.vault.ca-cert` | `MDS_VAULT_CA_CERT` | blank = the JDK's trust store; a PEM file for a private CA |
+| `mds.vault.auth` | `MDS_VAULT_AUTH` | `token`, `kubernetes` or `app-role` |
+| `mds.vault.token` | `MDS_VAULT_TOKEN` | for `auth=token`; an environment variable, never a file in git |
+| `mds.vault.kubernetes.role` | `MDS_VAULT_KUBERNETES_ROLE` | for `auth=kubernetes`; uses the pod's service-account token |
+| `mds.vault.app-role.role-id` / `.secret-id-file` | `MDS_VAULT_APP_ROLE_ID` / `MDS_VAULT_APP_ROLE_SECRET_ID_FILE` | for `auth=app-role` |
+
+- **On Kubernetes, use `auth=kubernetes`**: there's no secret to hand the pod, only a Vault role
+  bound to its service account. Elsewhere use `app-role`, with the platform delivering the
+  secret-id file.
+- **Login tokens are revoked** straight after the read, so a token mds logged in for doesn't
+  outlive startup.
+- **Vault policy:** `path "secret/data/mds/prod" { capabilities = ["read"] }`.
+- **Local development** needs no Vault. To try it, run a dev server:
+
+```bash
+docker run -d --name vault -p 127.0.0.1:8200:8200 -e VAULT_DEV_ROOT_TOKEN_ID=dev hashicorp/vault
+curl -s -H 'X-Vault-Token: dev' -d '{"data":{"mds.influx.token":"mds-dev-token"}}' \
+    http://127.0.0.1:8200/v1/secret/data/mds
+MDS_VAULT_ADDRESS=http://127.0.0.1:8200 MDS_VAULT_TOKEN=dev scripts/dev.sh run
+```
+
+### Secrets in git (SOPS)
+
+Some secrets have to live with the code: a shared development token, or CI credentials. Those go in
+the repository **encrypted with [SOPS](https://getsops.io/)** under `config/secrets/`, readable only
+by the keys listed in `.sops.yaml`. Deployed environments still read their secrets from Vault.
+
+- **Setup, once per developer:** `brew install sops age`, then
+  `age-keygen -o ~/.config/sops/age/keys.txt`. On macOS, also set `SOPS_AGE_KEY_FILE` to that file.
+  Send the lead your **public** key (`age1…`).
+- **Adding someone:** the lead adds the public key to `.sops.yaml`, re-encrypts every file for the
+  new list, and commits:
+  `for f in config/secrets/*.enc.*; do sops updatekeys -y "$f"; done`. Removing someone works the
+  same way, but also rotate the secrets they could read.
+- **Editing:** `sops config/secrets/local.enc.env` opens the decrypted file in your editor and
+  encrypts it again on save. A new file under `config/secrets/` must be named `*.enc.env`,
+  `*.enc.yaml` or `*.enc.json`; SOPS won't encrypt other names.
+- **Running locally:** if `config/secrets/local.enc.env` exists, `scripts/dev.sh run` decrypts it
+  with `sops exec-env`, straight into the app's environment: `MDS_INFLUX_TOKEN=…` lines become
+  environment variables, and nothing decrypted touches the disk. `scripts/dev.sh check` tells you if
+  your key can't decrypt it.
+
+**Guard rails.** The `pre-commit` hook (`scripts/dev.sh hooks`) and the `secrets` workflow run
+`scripts/check-secrets.sh`, which rejects:
+- anything under `config/secrets/` that isn't SOPS-encrypted;
+- `.env` files, `*.pem`, `*.key`, keystores, SSH and age key files, and decrypted `*.dec.*` files
+  (also in `.gitignore`);
+- private keys, age secret keys, AWS access key ids and Vault tokens in any file.
+
+If a secret was committed anyway, treat it as leaked: **rotate it first**, then remove it.
+Rewriting history doesn't help, because the commit has already been pushed and cloned.
 
 ## Outgoing proxy (SOCKS5)
 
@@ -529,6 +637,7 @@ as the candle changes. The compose bucket has infinite retention.
 com.mds
 ├── cluster/       Hazelcast member (ClusterConfig), Cluster (pair ownership, shared maps), health
 ├── config/        properties, InfluxDB client, clock, decimal precision, SSE executor, lifecycle logging
+├── configdata/    startup loaders: AWS SSM Parameter Store (SsmConfigData) and Vault (VaultConfigData)
 ├── logging/       LogEvent catalogue, EventLog, LogFields, RequestIds
 ├── exchange/      SupportedExchange, MarketStreamManager (WebSocket lifecycle), stream health check
 ├── math/          Decimal (fixed-point) and its JSON serializer
@@ -759,7 +868,8 @@ BREAKING-CHANGE: <what breaks and how to migrate>   ← always the last line
 ### Commit-message hook
 
 `.githooks/commit-msg` checks every commit message before git saves the commit, and rejects any
-that commitlint (and therefore CI) would reject. Install it once per clone:
+that commitlint (and therefore CI) would reject. `.githooks/pre-commit` rejects plaintext secrets in
+the staged files ([Secrets in git](#secrets-in-git-sops)). Install both once per clone:
 
 ```bash
 scripts/dev.sh hooks        # sets git config core.hooksPath to .githooks

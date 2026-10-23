@@ -20,6 +20,7 @@ repositories {
 
 val xchangeVersion = "6.0.0"
 val influxClientVersion = "8.0.0"
+val awsSdkVersion = "2.55.12"
 
 dependencies {
     implementation("org.springframework.boot:spring-boot-starter-webmvc")
@@ -39,6 +40,14 @@ dependencies {
 
     // Cluster: shared candle state and subscriber balancing (version from the Spring Boot BOM)
     implementation("com.hazelcast:hazelcast")
+
+    // Configuration from AWS SSM Parameter Store, over the JDK's HTTP client (no Apache or Netty)
+    implementation(platform("software.amazon.awssdk:bom:$awsSdkVersion"))
+    implementation("software.amazon.awssdk:ssm") {
+        exclude(group = "software.amazon.awssdk", module = "apache-client")
+        exclude(group = "software.amazon.awssdk", module = "netty-nio-client")
+    }
+    implementation("software.amazon.awssdk:url-connection-client")
 
     compileOnly("org.projectlombok:lombok")
     annotationProcessor("org.projectlombok:lombok")

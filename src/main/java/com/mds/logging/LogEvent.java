@@ -41,6 +41,12 @@ public enum LogEvent {
             "Cluster member started; pairs are shared out among the members, each building its own pairs' candles"),
     CLUSTER_SETTINGS_MISMATCH("MDS-1009", Level.ERROR,
             "Decimal precision or candle zone differs from the running cluster; this instance refuses to start"),
+    CONFIG_LOADED("MDS-1011", Level.INFO,
+            "Configuration loaded from AWS SSM Parameter Store at startup"),
+    SECRETS_LOADED("MDS-1012", Level.INFO,
+            "Secrets loaded from HashiCorp Vault at startup"),
+    CONFIG_LOAD_FAILED("MDS-1013", Level.ERROR,
+            "Could not load configuration or secrets at startup; this instance refuses to start"),
 
     CANDLES_COMPLETED("MDS-2001", Level.INFO,
             "Candles for ended periods completed and written"),

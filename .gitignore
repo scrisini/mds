@@ -5,4 +5,10 @@ out/
 *.log
 .DS_Store
 .idea/workspace.xml
+# plaintext secrets never go in git: encrypt them with SOPS under config/secrets/ (README)
+.env
+.env.*
+!.env.example
+*.dec.*
+*.agekey
 .idea/shelf/

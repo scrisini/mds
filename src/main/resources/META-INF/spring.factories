@@ -1,0 +1,7 @@
+# Configuration and secrets loaded at startup: spring.config.import in application.yml
+org.springframework.boot.context.config.ConfigDataLocationResolver=\
+com.mds.configdata.SsmConfigData$Resolver,\
+com.mds.configdata.VaultConfigData$Resolver
+org.springframework.boot.context.config.ConfigDataLoader=\
+com.mds.configdata.SsmConfigData$Loader,\
+com.mds.configdata.VaultConfigData$Loader

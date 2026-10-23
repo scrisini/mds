@@ -25,6 +25,8 @@ scripts/dev.sh run [args...]   # start InfluxDB, then the app on :8080; args go 
 scripts/dev.sh status          # InfluxDB and app health
 scripts/dev.sh hooks           # install the commit-msg hook (do this once per clone)
 scripts/test-commit-msg.sh     # test the hook after changing it or .commitlintrc.json
+scripts/check-secrets.sh --all # scan tracked files for plaintext secrets (the hook scans staged files)
+scripts/test-check-secrets.sh  # test the secrets check after changing it
 ```
 
 See README "Running locally" for prerequisites and all `scripts/dev.sh` commands. Never run
@@ -36,6 +38,7 @@ See README "Running locally" for prerequisites and all `scripts/dev.sh` commands
 com.mds
 ├── cluster/      Hazelcast member config, Cluster (pair ownership, shared maps), cluster health
 ├── config/       @ConfigurationProperties records (MdsProperties, InfluxProperties), beans, lifecycle logging
+├── configdata/   startup loaders for AWS SSM Parameter Store and Vault (spring.factories)
 ├── logging/      LogEvent catalogue, EventLog, LogFields, RequestIds: logs for production support
 ├── exchange/     SupportedExchange, MarketStreamManager (WebSocket lifecycle), Bitstamp patch
 ├── math/         Decimal fixed-point type and its JSON serializer
@@ -77,7 +80,17 @@ com.mds
   `double` only when writing to or reading from InfluxDB. Precision is set by `mds.decimal.*`
   once per JVM, so don't create non-zero `Decimal`s in static initialisers or bean constructors.
 - **Configuration:** add settings as fields on the `MdsProperties` records with `@DefaultValue`,
-  then document them in `application.yml` and the README configuration table.
+  then document them in `application.yml` and the README configuration table. Deployed values come
+  from AWS SSM Parameter Store, secrets from Vault (README "Configuration and secrets"); both are
+  read at startup by `configdata/` and fail closed.
+- **Secrets:** never in plaintext in git, logs or error messages: not in `application.yml`, tests,
+  fixtures or docs.
+  - A new secret is a property that Vault supplies when deployed, with only a local development
+    default (like `mds-dev-token`).
+  - Secrets that must be in the repository are SOPS-encrypted under `config/secrets/`.
+  - `scripts/check-secrets.sh` (the pre-commit hook and the `secrets` workflow) enforces this; run
+    `scripts/test-check-secrets.sh` after changing it.
+  - Never `git commit --no-verify` to get past it; if it's a false alarm, say so and ask.
 - **Time:** inject `java.time.Clock` (a bean); never call `Instant.now()` in services or
   controllers, so tests can control time (`com.mds.support.MutableClock`).
 - **InfluxDB:** all access goes through `PriceRepository`. Any value interpolated into Flux must be
