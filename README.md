@@ -17,7 +17,7 @@ EKS behind an ALB), see [`docs/deployment.md`](docs/deployment.md).
 | Real-time streams | Server-Sent Events, and a WebSocket carrying several pairs, each at its own rate (1 to 10 per second, or every change) | [Real-time subscriptions](#real-time-subscriptions-rates) |
 | gRPC API | Prices and streams over gRPC (port 9090) in compact protobuf: 111 bytes per event against about 1,300 for SSE, with gzip where it pays | [gRPC API](#grpc-api) |
 | Stream heartbeats | An SSE comment line or WebSocket ping every 30 s, so load balancers don't close quiet streams (`MDS_STREAM_HEARTBEAT`) | [Timeouts](docs/deployment.md#timeouts) |
-| OHLC candles | Day, week, month and year candles for the index and each exchange, kept across restarts | [OHLC candles](#ohlc-candles) |
+| OHLC candles | Hour, day, week, month and year candles for the index and each exchange, kept across restarts | [OHLC candles](#ohlc-candles) |
 | History | Price snapshots and candles archived in InfluxDB and served over REST | [InfluxDB schema](#influxdb-schema) |
 | Fixed-point prices | Exact decimal arithmetic on a `long`, with configurable precision (`MDS_DECIMAL_SCALE`) | [Decimal precision](#decimal-precision) |
 | **High availability** | | |
@@ -47,7 +47,7 @@ exchange WebSockets ──► MarketStreamManager ──► QuoteBook (latest qu
                         REST /api/v1/prices ◄──────┤  aggregated on each request
                         SSE /api/v1/stream ◄───────┤  pushed on change, at each client's rate
                         WebSocket /api/v1/ws ◄─────┤  several pairs per socket, rate per pair
-                        CandleService ◄────────────┤  OHLC per tick ──► InfluxDB (every 10s + at midnight)
+                        CandleService ◄────────────┤  OHLC per tick ──► InfluxDB (every 10s + on the hour)
                         PriceArchiver (every 5s) ◄─┘──► InfluxDB ──► REST /api/v1/history
 ```
 
@@ -234,7 +234,7 @@ Grafana on http://localhost:3000 opens on the first dashboard. All three are in 
 |---|---|---|
 | **mds and InfluxDB health** | Prometheus | **Health:** whether each service is up, whether mds's stored configuration would let it restart, uptimes, cluster members. **mds:** heap, CPU, GC and threads; quotes received per exchange, writes to InfluxDB, HTTP requests, real-time subscribers, p99 latencies (README [Latency](#latency)) and InfluxDB call times. **InfluxDB:** memory, goroutines, write and query requests, points written, query duration, disk |
 | **Prices: BTC/USD and ETH/USD** | InfluxDB (Flux) | The latest last-trade price of each pair per exchange, and charts of it over time (`ticker` measurement, `last` field, as archived every `mds.archive.interval`) |
-| **Candles: day, week, month and year** | InfluxDB (Flux) | [OHLC candles](#ohlc-candles) for every supported period of the pair and source picked at the top (`index` or an exchange): a candlestick chart per period over its default history range (30 days, 26 weeks, 24 months, 10 years), and a table of each period's current candle with `updates` and `complete` (`ohlc` measurement) |
+| **Candles: hour, day, week, month and year** | InfluxDB (Flux) | [OHLC candles](#ohlc-candles) for every supported period of the pair and source picked at the top (`index` or an exchange): a candlestick chart per period over its default history range (48 hours, 30 days, 26 weeks, 24 months, 10 years), and a table of each period's current candle with `updates` and `complete` (`ohlc` measurement) |
 
 - **Files:** dashboards are JSON in `config/grafana/dashboards/`, loaded at startup. The data
   sources (uids `prometheus` and `influxdb`) are in `config/grafana/provisioning/`, and the scrape
@@ -249,8 +249,8 @@ Grafana on http://localhost:3000 opens on the first dashboard. All three are in 
   `curl localhost:8080/actuator/health`.
 - mds from the IDE isn't scraped (Prometheus looks for the `mds` container). The prices and candles
   dashboards work either way, since they read InfluxDB.
-- A new InfluxDB has one candle per period (the current one); history builds up a day, week, month
-  or year at a time.
+- A new InfluxDB has one candle per period (the current one); history builds up an hour, day, week,
+  month or year at a time.
 
 #### Troubleshooting
 
@@ -315,7 +315,7 @@ java -jar build/libs/mds-0.0.1-SNAPSHOT.jar
 | GET | `/api/v1/history/{pair}/tickers` | Archived per-exchange tickers; optional `exchange=` |
 | GET | `/api/v1/stream/prices/{pair}?rate=2` | Server-Sent Events stream of live aggregates |
 | WS | `/api/v1/ws/prices` | WebSocket: subscribe to several pairs, each at its own rate |
-| GET | `/api/v1/candles/{pair}?period=day&source=index` | Stored OHLC candles (`day`, `week`, `month`, `year`), oldest first |
+| GET | `/api/v1/candles/{pair}?period=day&source=index` | Stored OHLC candles (`hour`, `day`, `week`, `month`, `year`), oldest first |
 | GET | `/api/v1/candles/{pair}/current?source=index` | Live in-progress candles for every period |
 | GET | `/actuator/health` | Includes `influx` and `streams` (up while any exchange is connected) checks |
 
@@ -737,21 +737,23 @@ Destinations the proxy must allow (all TCP 443), as observed with the default ex
 
 ## OHLC candles
 
-`CandleService` builds open/high/low/close candles for every pair, for each calendar `day`, `week`
-(Monday start), `month` and `year`, from two kinds of source:
+`CandleService` builds open/high/low/close candles for every pair, for each `hour` and calendar
+`day`, `week` (Monday start), `month` and `year`, from two kinds of source:
 
 - `index` — the cross-exchange median of fresh last prices (robust to one exchange printing an outlier)
 - each exchange id — that exchange's last price
 
 Candles are updated in memory on every quote update, so highs and lows see every tick, not just
-the 5-second archive snapshots. Periods start at local midnight in `mds.ohlc.zone` (default UTC).
+the 5-second archive snapshots. Periods start in `mds.ohlc.zone` (default UTC): hours on the local
+hour, longer periods at local midnight. An hour is always 60 minutes, so when daylight saving ends,
+the repeated local hour gets two candles, and when it starts, the skipped one gets none.
 
 Keeping them timely:
 
 - every `mds.ohlc.flush-interval` (10s) all in-progress candles are upserted with `complete=false`,
   and candles whose period has ended are closed and written with `complete=true`;
-- an extra flush at midnight in `mds.ohlc.zone` (the boundary every period shares) closes the
-  ended candles within a second of the period end;
+- an extra flush at the start of every hour in `mds.ohlc.zone` (where every period ends; days and
+  longer at midnight) closes the ended candles within a second of the period end;
 - a completed candle that fails to write is retried on each flush until it succeeds;
 - on startup the latest candle of every series is reloaded from InfluxDB: the current period's
   continues with its open, high and low intact, and periods missed while the service was down are
@@ -778,7 +780,7 @@ curl 'localhost:8080/api/v1/candles/ETH-USD/current?source=kraken'
 ```
 
 History accepts `from` / `to` (ISO-8601, candles whose period *starts* in the range) and `limit`;
-`from` defaults to 30 days, 26 weeks, 24 months or 10 years back.
+`from` defaults to 48 hours, 30 days, 26 weeks, 24 months or 10 years back.
 
 ## Running several instances
 

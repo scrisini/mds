@@ -58,8 +58,9 @@ import org.springframework.stereotype.Service;
  * <ul>
  *   <li>every {@code mds.ohlc.flush-interval} all in-progress candles are written, and candles
  *       whose period has ended are closed and written with {@code complete=true};</li>
- *   <li>an extra flush runs at local midnight in {@code mds.ohlc.zone}, the boundary every period
- *       shares, so completed candles land within a second of the period end;</li>
+ *   <li>an extra flush runs at the start of every local hour in {@code mds.ohlc.zone}, where every
+ *       period ends (days and longer at midnight), so completed candles land within a second of the
+ *       period end;</li>
  *   <li>a completed candle whose write fails stays queued and is retried on the next flush;</li>
  *   <li>a member that owns a pair whose candles aren't in the cluster (the cluster just started, or
  *       lost them in a split or a crash of two     members) first reloads the pair's latest stored candles
@@ -224,7 +225,7 @@ public class CandleService implements SmartLifecycle {
         flush();
     }
 
-    @Scheduled(cron = "0 0 0 * * *", zone = "${mds.ohlc.zone:UTC}")
+    @Scheduled(cron = "0 0 * * * *", zone = "${mds.ohlc.zone:UTC}")
     public void periodBoundaryFlush() {
         log.debug("Period boundary flush");
         flush();

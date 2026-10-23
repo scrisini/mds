@@ -76,7 +76,7 @@ mds:
     # 120s in docs/deployment.md) don't close quiet ones. 0 = off.
     heartbeat: ${MDS_STREAM_HEARTBEAT:30s}
   ohlc:
-    # midnight in this zone starts each day/week (Monday)/month/year candle
+    # each hour candle starts on the hour in this zone, and each day/week (Monday)/month/year candle at midnight
     zone: ${MDS_OHLC_ZONE:UTC}
     flush-interval: 10s
   # SOCKS5 proxy for all exchange traffic (WebSocket and REST); blank host = direct. InfluxDB is not proxied.
