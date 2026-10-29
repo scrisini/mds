@@ -23,11 +23,15 @@ repositories {
 val xchangeVersion = "6.0.0"
 val influxClientVersion = "8.0.0"
 val awsSdkVersion = "2.55.12"
+// 3.1.x is built on Spring Boot 4.1; check the springdoc release notes before moving to a newer Boot line
+val springdocVersion = "3.1.1"
 
 dependencies {
     implementation("org.springframework.boot:spring-boot-starter-webmvc")
     implementation("org.springframework.boot:spring-boot-starter-websocket")
     implementation("org.springframework.boot:spring-boot-starter-actuator")
+    // OpenAPI description (/v3/api-docs) and Swagger UI (/swagger-ui.html) of the REST API; off in production
+    implementation("org.springdoc:springdoc-openapi-starter-webmvc-ui:$springdocVersion")
     // /actuator/prometheus, for the Grafana stack in docker-compose.yml; off unless MDS_PROMETHEUS_ENABLED
     runtimeOnly("io.micrometer:micrometer-registry-prometheus")
     // gRPC API on its own port (src/main/proto); versions from the Spring Boot BOM

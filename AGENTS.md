@@ -110,6 +110,11 @@ com.mds
   validated (`MarketPair` codes, regex-checked ids, enums, `Instant`s); never pass raw user input.
 - **Errors:** throw domain exceptions from services and map them in `ApiExceptionHandler`, which
   adds the `requestId`. Anything unmapped becomes a 500 logged as `MDS-9001`.
+- **REST API docs** (README "API documentation"): springdoc builds the OpenAPI description from the
+  controllers. A new endpoint gets `@Operation(summary = ...)` (and its controller a `@Tag`), and
+  `@Parameter(description = ...)` for anything a caller can't guess; `ApiDocsTest` lists the
+  paths it expects. A new value type that serializes as a JSON scalar (like `Decimal`) gets a
+  schema in `OpenApiConfig`, or the docs show its getters.
 - **Metrics:** name custom meters `mds.<area>.<thing>`, and keep each meter's tag keys consistent.
   Quote updates carry `receivedNanos` (stamped by `QuoteBook`) so the time to subscribers
   (`mds.stream.latency`, `mds.stream.queue`) and to candles (`mds.candles.lag`) is measured; keep it

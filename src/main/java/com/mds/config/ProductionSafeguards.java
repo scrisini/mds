@@ -62,6 +62,12 @@ public class ProductionSafeguards {
             violations.add("mds.stream.allow-unthrottled lets clients ask for every change: set "
                     + "MDS_STREAM_ALLOW_UNTHROTTLED=false");
         }
+        // springdoc's own default is on, so an unset key counts as on
+        if (binder.bind("springdoc.api-docs.enabled", Boolean.class).orElse(true)
+                || binder.bind("springdoc.swagger-ui.enabled", Boolean.class).orElse(true)) {
+            violations.add("springdoc.api-docs.enabled: the OpenAPI description and Swagger UI let anyone browse "
+                    + "and call the API: set MDS_API_DOCS_ENABLED=false");
+        }
         return violations;
     }
 }
