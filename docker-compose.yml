@@ -4,8 +4,8 @@
 #   docker compose up -d                  InfluxDB only; run mds from the IDE or scripts/dev.sh run
 #   docker compose --profile app up -d    InfluxDB, mds, Prometheus and Grafana (scripts/dev.sh docker)
 #
-# The mds image is the one production uses, built with buildpacks:
-#   ./gradlew bootBuildImage --imageName=mds:local
+# The mds image is built from the Dockerfile (Eclipse Temurin 21 JRE and the jar Gradle builds):
+#   ./gradlew bootJar && docker compose --profile app up -d --build
 services:
   influxdb:
     image: influxdb:2.7
@@ -33,17 +33,14 @@ services:
   mds:
     profiles: ["app"]
     image: ${MDS_IMAGE:-mds:local}
-    pull_policy: never   # built locally, see above
+    build: .             # the Dockerfile; needs build/libs/mds.jar (./gradlew bootJar)
+    pull_policy: build   # built here, never pulled
     depends_on:
       influxdb:
         condition: service_healthy
     # InfluxDB connection and other mds settings for this network
     env_file: config/docker.env
-    environment:
-      # Runtime settings of the buildpack image, as in deploy/ (docs/deployment.md "Container images")
-      BPL_JAVA_NMT_ENABLED: "false"
-      JAVA_TOOL_OPTIONS: -XX:MaxDirectMemorySize=192m
-    # The heap is sized from this limit (about the limit minus 650 MiB); below 1 GiB mds doesn't start
+    # The heap is 60% of this limit (the Dockerfile's -XX:MaxRAMPercentage); below 1 GiB mds doesn't start
     mem_limit: 1536m
     # Spring waits up to 30s per shutdown phase (spring.lifecycle.timeout-per-shutdown-phase)
     stop_grace_period: 60s

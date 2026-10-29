@@ -1,0 +1,3 @@
+# The Dockerfile needs only the jar Gradle builds; nothing else goes to the Docker daemon.
+*
+!build/libs/mds.jar
