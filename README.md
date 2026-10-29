@@ -15,6 +15,7 @@ EKS behind an ALB), see [`docs/deployment.md`](docs/deployment.md).
 | Exchange streams | Streams tickers from Binance, Kraken, Bitstamp, KuCoin and Bitfinex over WebSocket, and reconnects by itself | [Configuration](#configuration) |
 | Aggregated prices | Mean, median, VWAP, min, max and best bid/ask per pair across the exchanges, leaving out stale quotes | [REST API](#rest-api) |
 | Real-time streams | Server-Sent Events, and a WebSocket carrying several pairs, each at its own rate (1 to 10 per second, or every change) | [Real-time subscriptions](#real-time-subscriptions-rates) |
+| API documentation | An OpenAPI description of the REST API and Swagger UI to read and try it in a browser, at http://localhost:8080/swagger-ui.html; off in production (`MDS_API_DOCS_ENABLED`) | [API documentation](#api-documentation-openapi) |
 | gRPC API | Prices and streams over gRPC (port 9090) in compact protobuf: 111 bytes per event against about 1,300 for SSE, with gzip where it pays | [gRPC API](#grpc-api) |
 | Stream heartbeats | An SSE comment line or WebSocket ping every 30 s, so load balancers don't close quiet streams (`MDS_STREAM_HEARTBEAT`) | [Timeouts](docs/deployment.md#timeouts) |
 | OHLC candles | Hour, day, week, month and year candles for the index and each exchange, kept across restarts | [OHLC candles](#ohlc-candles) |
@@ -85,6 +86,10 @@ curl localhost:8080/api/v1/prices/BTC-USDT              # live aggregate
 curl -N 'localhost:8080/api/v1/stream/prices/BTC-USDT?throttle=1s'
 ```
 
+To browse and try the REST API, open **http://localhost:8080/swagger-ui.html** (Swagger UI; the
+OpenAPI description is at http://localhost:8080/v3/api-docs, see
+[API documentation](#api-documentation-openapi)).
+
 Exchanges connect within a few seconds of startup; until a pair's first update arrives its
 endpoints return 503. The InfluxDB UI is at http://localhost:8086 (user `admin`, password
 `admin-password`, org `mds`, bucket `prices`).
@@ -96,7 +101,7 @@ endpoints return 503. The InfluxDB UI is at http://localhost:8086 (user `admin`,
 | `check` | Checks Java, Docker, free ports, and whether the exchanges are reachable from your network |
 | `infra` | Starts InfluxDB with Docker Compose and waits until it's healthy |
 | `run [args…]` | `check` + `infra`, then `./gradlew bootRun`; extra args go to Spring Boot |
-| `docker [--build]` | Runs InfluxDB, **mds**, Prometheus and Grafana in Docker ([In Docker](#in-docker)); builds the image first if it's missing or with `--build` |
+| `docker` | Builds the jar and the mds image, then runs InfluxDB, **mds**, Prometheus and Grafana in Docker ([In Docker](#in-docker)) |
 | `status` | Shows InfluxDB and app health |
 | `test` | Runs the test suite |
 | `stop` | Stops the containers (InfluxDB, and the others if started with `docker`); data is kept in Docker volumes |
@@ -120,22 +125,20 @@ MDS_INFLUX_URL=https://influx.example.com MDS_INFLUX_TOKEN=… MDS_INFLUX_ORG=�
 
 ### In Docker
 
-Runs mds itself in a container next to InfluxDB, with the same image as production, plus Prometheus
-and Grafana with [dashboards](#dashboards) for both services. Use it to try a build as it will be
-deployed; for day-to-day coding, `scripts/dev.sh run` (or the IDE) restarts faster.
+Runs mds itself in a container next to InfluxDB, plus Prometheus and Grafana with
+[dashboards](#dashboards) for both services. Use it to try a build in a container; for day-to-day
+coding, `scripts/dev.sh run` (or the IDE) restarts faster.
 
 **You need** Docker with Compose v2 and at least 2 GiB of memory to spare for Docker (Docker Desktop:
-Settings → Resources), free ports 8080, 9090, 8086, 3000 and 9091, and a JDK to build the image (as in
-[Prerequisites](#prerequisites)). No other setup: the repository's defaults work as they are.
+Settings → Resources), free ports 8080, 9090, 8086, 3000 and 9091, and a JDK to build the jar (as in
+[Prerequisites](#prerequisites)). Any Docker runtime works: Docker Desktop, Rancher Desktop, Colima.
+No other setup: the repository's defaults work as they are.
 
-**1. Build the image** (once, then after each code change you want to try):
+**1. Build the jar** (after each code change you want to try):
 
 ```bash
-./gradlew bootBuildImage --imageName=mds:local
+./gradlew bootJar               # build/libs/mds.jar
 ```
-
-It's built with Cloud Native Buildpacks, as for production (`docs/deployment.md` "Container
-images"), and needs no Dockerfile. The first build downloads the buildpacks (a few minutes).
 
 **2. Start InfluxDB, mds, Prometheus and Grafana:**
 
@@ -143,6 +146,10 @@ images"), and needs no Dockerfile. The first build downloads the buildpacks (a f
 docker compose --profile app up -d
 ```
 
+Compose builds the mds image from the `Dockerfile` on every `up`: the official Eclipse Temurin 21
+JRE image (`eclipse-temurin:21-jre-noble`) with `build/libs/mds.jar`, split into Spring Boot's
+layers so a code change rebuilds only the last one (a second or two). Nothing is downloaded while
+building except the base image, so it builds wherever Docker can pull images, behind a proxy too.
 mds starts once InfluxDB is healthy. Without `--profile app`, compose starts only InfluxDB (what
 `scripts/dev.sh run` and the IDE use).
 
@@ -152,6 +159,7 @@ mds starts once InfluxDB is healthy. Without `--profile app`, compose starts onl
 curl localhost:8080/actuator/health/readiness   # {"status":"UP"} after 10 to 20 seconds
 curl localhost:8080/api/v1/prices/BTC-USDT
 docker compose logs -f mds
+open http://localhost:8080/swagger-ui.html      # Swagger UI: browse and try the REST API
 open http://localhost:3000                      # Grafana: the dashboards, no login needed
 ```
 
@@ -162,9 +170,13 @@ docker compose --profile app stop
 docker compose --profile app down --volumes      # deletes all InfluxDB, Prometheus and Grafana data
 ```
 
-`scripts/dev.sh` does the same in one step each: `docker` builds the image if it's missing (or
-always, with `--build`), starts everything and waits until mds is ready; `stop` and `reset` stop or
-delete all the containers.
+`scripts/dev.sh` does the same in one step each: `docker` builds the jar and the image, starts
+everything and waits until mds is ready; `stop` and `reset` stop or delete all the containers.
+
+Production images are built differently, with Cloud Native Buildpacks (`./gradlew bootBuildImage`,
+`docs/deployment.md` "Container images"). Both run the same jar on a Java 21 JRE, with the same user
+(`1002:1001`) and about the same heap; the buildpack image sizes memory with its own calculator and
+needs the buildpacks' JRE download, which some networks block.
 
 #### How it fits together
 
@@ -209,7 +221,7 @@ next to `docker-compose.yml` (ignored by git), for example `MDS_HTTP_PORT=8081`.
 
 | Variable | Default | What it changes |
 |---|---|---|
-| `MDS_IMAGE` | `mds:local` | The mds image to run, e.g. another tag you built. Never pulled from a registry |
+| `MDS_IMAGE` | `mds:local` | The tag compose gives the image it builds. Never pulled from a registry |
 | `MDS_HTTP_PORT` | `8080` | Host port for REST, SSE, WebSocket and `/actuator` (`scripts/dev.sh docker` takes it from `SERVER_PORT`) |
 | `MDS_GRPC_HOST_PORT` | `9090` | Host port for the [gRPC API](#grpc-api) |
 | `GRAFANA_PORT` | `3000` | Host port for Grafana |
@@ -220,9 +232,10 @@ create the user `admin` / `admin-password`, the org `mds`, the bucket `prices` a
 `mds-dev-token`. They apply **only when the data volume is first created**: after changing them,
 delete the data (`scripts/dev.sh reset`), and change `config/docker.env` to match.
 
-**Fixed in `docker-compose.yml`**, as in production (`deploy/`): 1.5 GiB of memory (the JVM sizes
-its heap from it; below 1 GiB mds doesn't start), 192 MiB of direct memory for gRPC,
-`BPL_JAVA_NMT_ENABLED=false`, and 60 seconds to shut down gracefully.
+**Fixed in `docker-compose.yml` and the `Dockerfile`**, as in production (`deploy/`): 1.5 GiB of
+memory (the heap is 60% of it, about 890 MiB; below 1 GiB mds doesn't start), 192 MiB of direct
+memory for gRPC, and 60 seconds to shut down gracefully. Other JVM options go in
+`JAVA_TOOL_OPTIONS` in `config/docker.env`.
 
 #### Dashboards
 
@@ -254,7 +267,11 @@ Grafana on http://localhost:3000 opens on the first dashboard. All three are in 
 
 #### Troubleshooting
 
-- **`No such image: mds:local`**: build the image first (step 1).
+- **`"/build/libs/mds.jar": not found`** while building: build the jar first (step 1). The image
+  has no Gradle in it.
+- **The build can't pull `eclipse-temurin:21-jre-noble`**: Docker itself can't reach Docker Hub;
+  check its proxy settings (Docker Desktop: Settings → Resources → Proxies), as for InfluxDB and
+  Grafana.
 - **`port is already allocated`**: something else uses 8080, 9090 or 8086, often mds run from the
   IDE. Stop it, or pick other host ports with `MDS_HTTP_PORT` / `MDS_GRPC_HOST_PORT`.
 - **Don't run mds from the IDE at the same time** against this InfluxDB, even on another port: the
@@ -266,8 +283,8 @@ Grafana on http://localhost:3000 opens on the first dashboard. All three are in 
 - **A dashboard panel says "No data"**: mds or InfluxDB just started (wait 10 to 20 seconds), or,
   for the mds panels, `MDS_PROMETHEUS_ENABLED` isn't `true` in `config/docker.env`. Prometheus shows
   each target's state at http://localhost:9091/targets.
-- **Your code changes don't show up**: rebuild the image (step 1, or `scripts/dev.sh docker --build`),
-  then run step 2 again.
+- **Your code changes don't show up**: build the jar again (step 1), then run step 2; or
+  `scripts/dev.sh docker`, which does both.
 - **The first `up` after updating this repository recreates the InfluxDB container** (when its
   network changed). The data is kept in the `influxdb-data` volume.
 
@@ -284,7 +301,7 @@ Or build a jar and run it with any Java 21+ runtime:
 
 ```bash
 ./gradlew bootJar
-java -jar build/libs/mds-0.0.1-SNAPSHOT.jar
+java -jar build/libs/mds.jar
 ```
 
 ### Troubleshooting
@@ -317,6 +334,8 @@ java -jar build/libs/mds-0.0.1-SNAPSHOT.jar
 | WS | `/api/v1/ws/prices` | WebSocket: subscribe to several pairs, each at its own rate |
 | GET | `/api/v1/candles/{pair}?period=day&source=index` | Stored OHLC candles (`hour`, `day`, `week`, `month`, `year`), oldest first |
 | GET | `/api/v1/candles/{pair}/current?source=index` | Live in-progress candles for every period |
+| GET | `/swagger-ui.html` | Swagger UI: browse and try the REST API in a browser ([API documentation](#api-documentation-openapi)) |
+| GET | `/v3/api-docs` | OpenAPI 3.1 description of the REST API (JSON; `/v3/api-docs.yaml` for YAML) |
 | GET | `/actuator/health` | Includes `influx` and `streams` (up while any exchange is connected) checks |
 
 History endpoints accept `from` / `to` (ISO-8601, default: last hour), `window` (`30s`, `5m`, `1h`, `1d`…
@@ -325,6 +344,30 @@ averages rows into buckets) and `limit` (default 1000, max 10000).
 Errors are RFC 9457 problem details. Every response has an `X-Request-Id` header (the caller's, if
 it sent a safe one, otherwise generated), and error bodies repeat it as `requestId`, so a caller
 can quote it to support (see [Logging and support](#logging-and-support)).
+
+### API documentation (OpenAPI)
+
+Open **http://localhost:8080/swagger-ui.html** in a browser for Swagger UI: every REST endpoint
+with its parameters, response models and examples. **Try it out** sends a real request to the
+instance and shows the response, its status and its `X-Request-Id`. The OpenAPI 3.1 description
+itself is at `/v3/api-docs` (JSON) and `/v3/api-docs.yaml`, for client generators and tools such as
+Postman.
+
+- **Generated from the code** by [springdoc-openapi](https://springdoc.org): paths and models from
+  the controllers and records, summaries and parameter descriptions from their `@Operation`,
+  `@Parameter` and `@Tag` annotations. Prices and volumes are described as numbers, as they're sent.
+- **Covers `/api/**` only.** The WebSocket API ([WebSocket](#websocket)), the gRPC API
+  ([gRPC API](#grpc-api)) and `/actuator` aren't in it.
+- **Server-Sent Events:** Swagger UI waits for a response to end, so a stream shows nothing; use
+  `curl -N` or an `EventSource` for `/api/v1/stream/prices/{pair}`.
+- **On by default, off in production.** `MDS_API_DOCS_ENABLED=false` turns off both paths (404).
+  [Production mode](#production-mode) refuses to start while they're on, because they let anyone
+  who reaches the instance browse and call the whole API; the files in `deploy/` set it.
+- Everything the UI needs is served by the instance (no CDN), and it doesn't contact swagger.io's
+  online validator, so it works offline and behind a proxy.
+
+When adding an endpoint, give it an `@Operation(summary = ...)`, and a `@Parameter(description =
+...)` for anything a caller can't guess from the name.
 
 ### Real-time subscriptions: rates
 
@@ -488,6 +531,7 @@ Deployed environments take their settings from AWS SSM Parameter Store and their
 | `mds.grpc.compression` | `MDS_GRPC_COMPRESSION` | `auto` (gzip only for responses with quotes), `gzip` or `none` |
 | `mds.stream.heartbeat` | `MDS_STREAM_HEARTBEAT` | `30s`: an SSE comment or WebSocket ping on every open stream; `0` turns it off. Must be shorter than the load balancer's idle timeout |
 | `mds.stream.allow-unthrottled` | `MDS_STREAM_ALLOW_UNTHROTTLED` | `true` (permits `rate=unlimited`) |
+| `springdoc.api-docs.enabled` / `springdoc.swagger-ui.enabled` | `MDS_API_DOCS_ENABLED` (both) | `true`: `/v3/api-docs` and `/swagger-ui.html` ([API documentation](#api-documentation-openapi)); production mode needs `false` |
 | `mds.stream.allowed-origins` | `MDS_STREAM_ALLOWED_ORIGINS` | `*` (browser origins for WebSocket) |
 | `mds.decimal.scale` / `.rounding` | `MDS_DECIMAL_SCALE` / `MDS_DECIMAL_ROUNDING` | `8` / `HALF_EVEN` |
 | `mds.ohlc.zone` / `.flush-interval` | `MDS_OHLC_ZONE` | `UTC` / `10s` |
@@ -653,6 +697,7 @@ settings that are fine on a laptop but unsafe in production, and names each one 
 | Text logs | `MDS_LOG_FORMAT=ecs` |
 | WebSocket connections from any browser origin | `MDS_STREAM_ALLOWED_ORIGINS=https://app.example.com,…` |
 | `rate=unlimited` allowed | `MDS_STREAM_ALLOW_UNTHROTTLED=false` |
+| The OpenAPI description and Swagger UI ([API documentation](#api-documentation-openapi)) | `MDS_API_DOCS_ENABLED=false` |
 
 The configuration check applies the same rules to the stored configuration, so a change that would
 break them is reported before a restart. Staging and test environments that need the development
@@ -873,9 +918,8 @@ requests), so reconnects go to the quieter instances; no session stickiness is n
 ```bash
 scripts/dev.sh infra
 ./gradlew bootJar
-JAR=$(ls build/libs/mds-*.jar | grep -v plain)
-java -jar "$JAR" --mds.cluster.members=127.0.0.1 &
-java -jar "$JAR" --mds.cluster.members=127.0.0.1 --server.port=8081 &
+java -jar build/libs/mds.jar --mds.cluster.members=127.0.0.1 &
+java -jar build/libs/mds.jar --mds.cluster.members=127.0.0.1 --server.port=8081 &
 curl -s localhost:8081/actuator/health    # components.cluster: members 2, ownedPairs
 ```
 
@@ -1258,7 +1302,7 @@ subscribers, for the per-subscriber path):
 ```bash
 ./gradlew bootJar
 java -XX:StartFlightRecording=delay=60s,duration=5m,filename=build/mds.jfr \
-    -jar "$(ls build/libs/mds-*.jar | grep -v plain)" --mds.instance=agent
+    -jar build/libs/mds.jar --mds.instance=agent
 jfr view allocation-by-class build/mds.jfr   # jfr is in the JDK's bin directory
 jfr view hot-methods build/mds.jfr           # or open the file in JDK Mission Control
 ```
@@ -1272,7 +1316,7 @@ Commits typed `perf` carry before-and-after numbers in the body.
 Versions and release notes are generated by [semantic-release](https://semantic-release.gitbook.io)
 from commit messages on `main`, so every commit follows
 [Conventional Commits](https://www.conventionalcommits.org/), as configured in `.commitlintrc.json`
-and `.releaserc.json`. Every push to `main` (the squash of a release PR) runs
+and `.releaserc.mjs`. Every push to `main` (the squash of a release PR) runs
 `.github/workflows/release.yml`: it runs the tests, then semantic-release creates the `vX.Y.Z` tag
 and a GitHub release with notes. Nothing is released if the tests fail, or if no commit since the
 last tag calls for a release. The first release is `v1.0.0`.
@@ -1317,7 +1361,7 @@ BREAKING-CHANGE: <what breaks and how to migrate>   ← always the last line
   rest. Wrap lines at 100 characters.
 - The breaking-change footer is spelled `BREAKING-CHANGE: ` or `BREAKING CHANGE: ` (upper case,
   singular, colon, space), at the start of a footer line, and should say how to migrate.
-  semantic-release recognises only those two keywords (`.releaserc.json`), but it matches them
+  semantic-release recognises only those two keywords (`.releaserc.mjs`), but it matches them
   loosely: in any case, with a colon or just a space, at the start of **any** body line. So the
   plural `BREAKING CHANGES:` silently loses the major release, while a prose line such as
   "Breaking change avoided by…" silently causes one. The commit-msg hook rejects both: only the
@@ -1399,6 +1443,25 @@ squash-merge it. semantic-release then sees a single commit, so:
   breaking-change footer from the branch still triggers a major release. GitHub's default body
   also lists commits already released by an earlier squash; remove those, or their footers and
   `#N` references land in the release notes a second time.
+- **The body is published.** The release notes are the title as one line under "Features" (or
+  "Bug Fixes", ...), any "⚠ BREAKING CHANGES", then the body under "Details": what each change
+  does and how to upgrade. Trailers (`Co-Authored-By`, `Signed-off-by`, `Reviewed-by`, `Refs`) are
+  left out of the details. List each commit as `* <its title>` followed by its body, with one
+  `Co-Authored-By` per person at the end:
+
+  ```
+  feat(candles): add hourly candles and a Grafana dashboard of every candle period
+
+  * feat(candles): add hourly candles
+
+  CandlePeriod gets HOUR: ...
+
+  * feat(candles): add a Grafana dashboard of the candles for every period
+
+  A third dashboard, ...
+
+  Co-Authored-By: Name <email>
+  ```
 
 **Back-merge `main` into `develop` after every squash.** The squash commit on `main` doesn't exist
 in `develop`'s history. Without a back-merge, the next `develop` → `main` PR replays work `main`

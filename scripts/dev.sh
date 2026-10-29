@@ -5,7 +5,7 @@
 #   scripts/dev.sh check            verify prerequisites
 #   scripts/dev.sh infra            start InfluxDB (Docker) and wait until it is healthy
 #   scripts/dev.sh run [args...]    check, start InfluxDB, then run the app in the foreground
-#   scripts/dev.sh docker [--build] start InfluxDB, mds, Prometheus and Grafana in Docker
+#   scripts/dev.sh docker           build mds, then start it with InfluxDB, Prometheus and Grafana in Docker
 #   scripts/dev.sh status           show InfluxDB and app health
 #   scripts/dev.sh test             run the test suite
 #   scripts/dev.sh stop             stop the containers, keeping the data
@@ -214,14 +214,14 @@ cmd_run() {
 
 # mds in a container next to InfluxDB, configured by config/docker.env (docker-compose.yml)
 cmd_docker() {
-    if [ "${1:-}" = "--build" ] || ! docker image inspect "$MDS_IMAGE" >/dev/null 2>&1; then
-        step "Building image $MDS_IMAGE (buildpacks; the first build downloads them)"
-        ./gradlew bootBuildImage --console=plain --imageName="$MDS_IMAGE"
-    fi
-    if listening "$APP_PORT"; then
+    # --build, from when the image was built separately, is accepted: every run builds
+    step "Building build/libs/mds.jar"
+    ./gradlew bootJar --console=plain --quiet
+    # the port is fine when it's this project's mds container, which up replaces
+    if listening "$APP_PORT" && [ -z "$(docker compose ps --status running --quiet mds 2>/dev/null)" ]; then
         die "port $APP_PORT is in use (mds from the IDE?); stop it, or set SERVER_PORT for another host port"
     fi
-    step "Starting InfluxDB, mds, Prometheus and Grafana in Docker (network mds)"
+    step "Building image $MDS_IMAGE (Dockerfile) and starting InfluxDB, mds, Prometheus and Grafana (network mds)"
     MDS_IMAGE="$MDS_IMAGE" MDS_HTTP_PORT="$APP_PORT" docker compose --profile app up -d
     printf '    waiting for http://localhost:%s/actuator/health/readiness ' "$APP_PORT"
     local _

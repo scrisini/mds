@@ -22,7 +22,7 @@ cluster that shares the candles and balances real-time subscribers.
 ./gradlew compileJava          # fast compile check
 scripts/dev.sh check           # verify local prerequisites (Java, Docker, ports, exchange reachability)
 scripts/dev.sh run [args...]   # start InfluxDB, then the app on :8080; args go to Spring Boot
-scripts/dev.sh docker [--build] # InfluxDB, mds, Prometheus, Grafana in Docker (config/docker.env)
+scripts/dev.sh docker          # build the jar and image, run InfluxDB, mds, Prometheus, Grafana in Docker
 scripts/dev.sh status          # InfluxDB and app health
 scripts/dev.sh hooks           # install the commit-msg hook (do this once per clone)
 scripts/test-commit-msg.sh     # test the hook after changing it or .commitlintrc.json
@@ -110,6 +110,11 @@ com.mds
   validated (`MarketPair` codes, regex-checked ids, enums, `Instant`s); never pass raw user input.
 - **Errors:** throw domain exceptions from services and map them in `ApiExceptionHandler`, which
   adds the `requestId`. Anything unmapped becomes a 500 logged as `MDS-9001`.
+- **REST API docs** (README "API documentation"): springdoc builds the OpenAPI description from the
+  controllers. A new endpoint gets `@Operation(summary = ...)` (and its controller a `@Tag`), and
+  `@Parameter(description = ...)` for anything a caller can't guess; `ApiDocsTest` lists the
+  paths it expects. A new value type that serializes as a JSON scalar (like `Decimal`) gets a
+  schema in `OpenApiConfig`, or the docs show its getters.
 - **Metrics:** name custom meters `mds.<area>.<thing>`, and keep each meter's tag keys consistent.
   Quote updates carry `receivedNanos` (stamped by `QuoteBook`) so the time to subscribers
   (`mds.stream.latency`, `mds.stream.queue`) and to candles (`mds.candles.lag`) is measured; keep it
@@ -185,6 +190,10 @@ com.mds
   (phases in that order, highest first). `CandleService` starts first and stops last, so it
   recovers before the first tick and flushes after the last; `PriceStreamService` stops first and
   closes every stream, so clients reconnect elsewhere before the exchanges disconnect.
+- **Two images.** `docker-compose.yml` builds mds from the `Dockerfile` (Temurin 21 JRE and
+  `build/libs/mds.jar`, the fixed `bootJar` name), which needs nothing but the base image, so it
+  builds on any Docker runtime and behind proxies. Production uses buildpacks (`bootBuildImage`).
+  Keep the two aligned: user `1002:1001`, heap from the memory limit, 192 MiB direct memory.
 - **Deployment** (`docs/deployment.md`, files in `deploy/`): ECS or EKS behind an ALB. Its timeouts
   must agree with `application.yml` (ALB idle 120 s < `server.tomcat.keep-alive-timeout` 130 s);
   change both together. `deploy/` holds examples with `CHANGE` placeholders, never real account
@@ -212,8 +221,9 @@ com.mds
 
 Commits follow [Conventional Commits](https://www.conventionalcommits.org/), enforced locally by
 `.githooks/commit-msg` (install with `scripts/dev.sh hooks`) and on pull requests by the
-`commitlint` workflow, both using `.commitlintrc.json`. semantic-release (`.releaserc.json`) reads
-them to pick the next version; the `release` workflow (`.github/workflows/release.yml`) runs it on
+`commitlint` workflow, both using `.commitlintrc.json`. semantic-release (`.releaserc.mjs`) reads
+them to pick the next version and write the release notes, whose "Details" section is each
+released commit's body (trailers left out), so write bodies for readers; the `release` workflow (`.github/workflows/release.yml`) runs it on
 every push to `main`, after the tests pass, and publishes the tag and GitHub release. Never use
 `git commit --no-verify`; if the hook rejects a message, fix the message. Full guide: README
 "Contributing".

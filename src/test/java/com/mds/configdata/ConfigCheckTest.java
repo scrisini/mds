@@ -118,7 +118,9 @@ class ConfigCheckTest {
                 "mds.mode", "production",
                 "logging.structured.format.console", "ecs",
                 "mds.stream.allowed-origins", "https://app.example.com",
-                "mds.stream.allow-unthrottled", "false"));
+                "mds.stream.allow-unthrottled", "false",
+                "springdoc.api-docs.enabled", "false",
+                "springdoc.swagger-ui.enabled", "false"));
         assertThat(check.run().restartable()).isTrue();
 
         secret.remove("mds.influx.token");

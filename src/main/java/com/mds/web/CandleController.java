@@ -14,6 +14,9 @@ import com.mds.service.CandleService;
 import com.mds.service.PairNotSubscribedException;
 import com.mds.service.PriceService;
 import com.mds.service.UnknownExchangeException;
+import io.swagger.v3.oas.annotations.Operation;
+import io.swagger.v3.oas.annotations.Parameter;
+import io.swagger.v3.oas.annotations.tags.Tag;
 import org.springframework.format.annotation.DateTimeFormat;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -25,9 +28,12 @@ import org.springframework.web.bind.annotation.RestController;
  * OHLC candles. {@code source} is {@code index} (cross-exchange median, the default) or an
  * exchange id.
  */
+@Tag(name = "Candles", description = "OHLC candles per hour, day, week, month and year, for the index or one exchange")
 @RestController
 @RequestMapping("/api/v1/candles/{pair}")
 public class CandleController {
+
+    private static final String SOURCE = "index (the cross-exchange median) or an exchange id";
 
     private static final int MAX_LIMIT = 10_000;
 
@@ -51,12 +57,17 @@ public class CandleController {
      * current period's candle is included with {@code complete=false}. {@code from} defaults to
      * 48 hours, 30 days, 26 weeks, 24 months or 10 years back depending on {@code period}.
      */
+    @Operation(summary = "Stored candles, oldest first", description = "The current period's candle is included with "
+            + "complete=false. from defaults to 48 hours, 30 days, 26 weeks, 24 months or 10 years back, by period.")
     @GetMapping
     public List<Candle> history(
-            @PathVariable String pair,
+            @Parameter(example = "BTC-USDT") @PathVariable String pair,
+            @Parameter(description = "hour, day, week, month or year")
             @RequestParam(defaultValue = "day") String period,
-            @RequestParam(defaultValue = CandleService.INDEX) String source,
+            @Parameter(description = SOURCE) @RequestParam(defaultValue = CandleService.INDEX) String source,
+            @Parameter(description = "Earliest period start, ISO-8601")
             @RequestParam @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME) Optional<Instant> from,
+            @Parameter(description = "Latest period start, ISO-8601; defaults to now")
             @RequestParam @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME) Optional<Instant> to,
             @RequestParam(defaultValue = "1000") int limit) {
         MarketPair marketPair = subscribed(pair);
@@ -74,8 +85,10 @@ public class CandleController {
     }
 
     /** Live in-progress candles for every period, from memory. */
+    @Operation(summary = "In-progress candle of every period, from memory")
     @GetMapping("/current")
-    public List<Candle> current(@PathVariable String pair,
+    public List<Candle> current(@Parameter(example = "BTC-USDT") @PathVariable String pair,
+                                @Parameter(description = SOURCE)
                                 @RequestParam(defaultValue = CandleService.INDEX) String source) {
         return candles.current(subscribed(pair), checkedSource(source));
     }

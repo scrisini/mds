@@ -197,8 +197,8 @@ range, and the full log lines for that request id or code (including `error.stac
 - **Level:** ERROR. The instance stops during startup.
 - **Means:** `mds.mode` is `production` (`MDS_MODE`), and `mds.violations` lists settings that are
   unsafe there, each naming what to change: no `MDS_SSM_PATH` or `MDS_VAULT_ADDRESS`, the
-  development InfluxDB token, text logs instead of `MDS_LOG_FORMAT=ecs`, WebSocket origins `*`, or
-  `rate=unlimited` allowed.
+  development InfluxDB token, text logs instead of `MDS_LOG_FORMAT=ecs`, WebSocket origins `*`,
+  `rate=unlimited` allowed, or the OpenAPI description and Swagger UI on (`MDS_API_DOCS_ENABLED`).
 - **Check:** fix each listed setting in Parameter Store, Vault or the deployment's environment,
   then start again. To run without these rules (a test environment), set `MDS_MODE=development`.
 
