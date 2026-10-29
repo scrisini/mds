@@ -98,7 +98,8 @@ how much network an instance needs for a given number of exchanges, pairs and su
 
 ## Container images
 
-**mds:** Spring Boot builds an OCI image with Cloud Native Buildpacks. No Dockerfile is needed:
+**mds:** Spring Boot builds an OCI image with Cloud Native Buildpacks. (The repository's
+`Dockerfile` is for `docker-compose.yml` on a laptop: README "In Docker".) For production:
 
 ```bash
 ./gradlew bootBuildImage --imageName=123456789012.dkr.ecr.ap-southeast-2.amazonaws.com/mds:1.1.0

@@ -22,7 +22,7 @@ cluster that shares the candles and balances real-time subscribers.
 ./gradlew compileJava          # fast compile check
 scripts/dev.sh check           # verify local prerequisites (Java, Docker, ports, exchange reachability)
 scripts/dev.sh run [args...]   # start InfluxDB, then the app on :8080; args go to Spring Boot
-scripts/dev.sh docker [--build] # InfluxDB, mds, Prometheus, Grafana in Docker (config/docker.env)
+scripts/dev.sh docker          # build the jar and image, run InfluxDB, mds, Prometheus, Grafana in Docker
 scripts/dev.sh status          # InfluxDB and app health
 scripts/dev.sh hooks           # install the commit-msg hook (do this once per clone)
 scripts/test-commit-msg.sh     # test the hook after changing it or .commitlintrc.json
@@ -190,6 +190,10 @@ com.mds
   (phases in that order, highest first). `CandleService` starts first and stops last, so it
   recovers before the first tick and flushes after the last; `PriceStreamService` stops first and
   closes every stream, so clients reconnect elsewhere before the exchanges disconnect.
+- **Two images.** `docker-compose.yml` builds mds from the `Dockerfile` (Temurin 21 JRE and
+  `build/libs/mds.jar`, the fixed `bootJar` name), which needs nothing but the base image, so it
+  builds on any Docker runtime and behind proxies. Production uses buildpacks (`bootBuildImage`).
+  Keep the two aligned: user `1002:1001`, heap from the memory limit, 192 MiB direct memory.
 - **Deployment** (`docs/deployment.md`, files in `deploy/`): ECS or EKS behind an ALB. Its timeouts
   must agree with `application.yml` (ALB idle 120 s < `server.tomcat.keep-alive-timeout` 130 s);
   change both together. `deploy/` holds examples with `CHANGE` placeholders, never real account

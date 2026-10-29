@@ -101,7 +101,7 @@ endpoints return 503. The InfluxDB UI is at http://localhost:8086 (user `admin`,
 | `check` | Checks Java, Docker, free ports, and whether the exchanges are reachable from your network |
 | `infra` | Starts InfluxDB with Docker Compose and waits until it's healthy |
 | `run [args…]` | `check` + `infra`, then `./gradlew bootRun`; extra args go to Spring Boot |
-| `docker [--build]` | Runs InfluxDB, **mds**, Prometheus and Grafana in Docker ([In Docker](#in-docker)); builds the image first if it's missing or with `--build` |
+| `docker` | Builds the jar and the mds image, then runs InfluxDB, **mds**, Prometheus and Grafana in Docker ([In Docker](#in-docker)) |
 | `status` | Shows InfluxDB and app health |
 | `test` | Runs the test suite |
 | `stop` | Stops the containers (InfluxDB, and the others if started with `docker`); data is kept in Docker volumes |
@@ -125,22 +125,20 @@ MDS_INFLUX_URL=https://influx.example.com MDS_INFLUX_TOKEN=… MDS_INFLUX_ORG=�
 
 ### In Docker
 
-Runs mds itself in a container next to InfluxDB, with the same image as production, plus Prometheus
-and Grafana with [dashboards](#dashboards) for both services. Use it to try a build as it will be
-deployed; for day-to-day coding, `scripts/dev.sh run` (or the IDE) restarts faster.
+Runs mds itself in a container next to InfluxDB, plus Prometheus and Grafana with
+[dashboards](#dashboards) for both services. Use it to try a build in a container; for day-to-day
+coding, `scripts/dev.sh run` (or the IDE) restarts faster.
 
 **You need** Docker with Compose v2 and at least 2 GiB of memory to spare for Docker (Docker Desktop:
-Settings → Resources), free ports 8080, 9090, 8086, 3000 and 9091, and a JDK to build the image (as in
-[Prerequisites](#prerequisites)). No other setup: the repository's defaults work as they are.
+Settings → Resources), free ports 8080, 9090, 8086, 3000 and 9091, and a JDK to build the jar (as in
+[Prerequisites](#prerequisites)). Any Docker runtime works: Docker Desktop, Rancher Desktop, Colima.
+No other setup: the repository's defaults work as they are.
 
-**1. Build the image** (once, then after each code change you want to try):
+**1. Build the jar** (after each code change you want to try):
 
 ```bash
-./gradlew bootBuildImage --imageName=mds:local
+./gradlew bootJar               # build/libs/mds.jar
 ```
-
-It's built with Cloud Native Buildpacks, as for production (`docs/deployment.md` "Container
-images"), and needs no Dockerfile. The first build downloads the buildpacks (a few minutes).
 
 **2. Start InfluxDB, mds, Prometheus and Grafana:**
 
@@ -148,6 +146,10 @@ images"), and needs no Dockerfile. The first build downloads the buildpacks (a f
 docker compose --profile app up -d
 ```
 
+Compose builds the mds image from the `Dockerfile` on every `up`: the official Eclipse Temurin 21
+JRE image (`eclipse-temurin:21-jre-noble`) with `build/libs/mds.jar`, split into Spring Boot's
+layers so a code change rebuilds only the last one (a second or two). Nothing is downloaded while
+building except the base image, so it builds wherever Docker can pull images, behind a proxy too.
 mds starts once InfluxDB is healthy. Without `--profile app`, compose starts only InfluxDB (what
 `scripts/dev.sh run` and the IDE use).
 
@@ -168,9 +170,13 @@ docker compose --profile app stop
 docker compose --profile app down --volumes      # deletes all InfluxDB, Prometheus and Grafana data
 ```
 
-`scripts/dev.sh` does the same in one step each: `docker` builds the image if it's missing (or
-always, with `--build`), starts everything and waits until mds is ready; `stop` and `reset` stop or
-delete all the containers.
+`scripts/dev.sh` does the same in one step each: `docker` builds the jar and the image, starts
+everything and waits until mds is ready; `stop` and `reset` stop or delete all the containers.
+
+Production images are built differently, with Cloud Native Buildpacks (`./gradlew bootBuildImage`,
+`docs/deployment.md` "Container images"). Both run the same jar on a Java 21 JRE, with the same user
+(`1002:1001`) and about the same heap; the buildpack image sizes memory with its own calculator and
+needs the buildpacks' JRE download, which some networks block.
 
 #### How it fits together
 
@@ -215,7 +221,7 @@ next to `docker-compose.yml` (ignored by git), for example `MDS_HTTP_PORT=8081`.
 
 | Variable | Default | What it changes |
 |---|---|---|
-| `MDS_IMAGE` | `mds:local` | The mds image to run, e.g. another tag you built. Never pulled from a registry |
+| `MDS_IMAGE` | `mds:local` | The tag compose gives the image it builds. Never pulled from a registry |
 | `MDS_HTTP_PORT` | `8080` | Host port for REST, SSE, WebSocket and `/actuator` (`scripts/dev.sh docker` takes it from `SERVER_PORT`) |
 | `MDS_GRPC_HOST_PORT` | `9090` | Host port for the [gRPC API](#grpc-api) |
 | `GRAFANA_PORT` | `3000` | Host port for Grafana |
@@ -226,9 +232,10 @@ create the user `admin` / `admin-password`, the org `mds`, the bucket `prices` a
 `mds-dev-token`. They apply **only when the data volume is first created**: after changing them,
 delete the data (`scripts/dev.sh reset`), and change `config/docker.env` to match.
 
-**Fixed in `docker-compose.yml`**, as in production (`deploy/`): 1.5 GiB of memory (the JVM sizes
-its heap from it; below 1 GiB mds doesn't start), 192 MiB of direct memory for gRPC,
-`BPL_JAVA_NMT_ENABLED=false`, and 60 seconds to shut down gracefully.
+**Fixed in `docker-compose.yml` and the `Dockerfile`**, as in production (`deploy/`): 1.5 GiB of
+memory (the heap is 60% of it, about 890 MiB; below 1 GiB mds doesn't start), 192 MiB of direct
+memory for gRPC, and 60 seconds to shut down gracefully. Other JVM options go in
+`JAVA_TOOL_OPTIONS` in `config/docker.env`.
 
 #### Dashboards
 
@@ -260,7 +267,11 @@ Grafana on http://localhost:3000 opens on the first dashboard. All three are in 
 
 #### Troubleshooting
 
-- **`No such image: mds:local`**: build the image first (step 1).
+- **`"/build/libs/mds.jar": not found`** while building: build the jar first (step 1). The image
+  has no Gradle in it.
+- **The build can't pull `eclipse-temurin:21-jre-noble`**: Docker itself can't reach Docker Hub;
+  check its proxy settings (Docker Desktop: Settings → Resources → Proxies), as for InfluxDB and
+  Grafana.
 - **`port is already allocated`**: something else uses 8080, 9090 or 8086, often mds run from the
   IDE. Stop it, or pick other host ports with `MDS_HTTP_PORT` / `MDS_GRPC_HOST_PORT`.
 - **Don't run mds from the IDE at the same time** against this InfluxDB, even on another port: the
@@ -272,8 +283,8 @@ Grafana on http://localhost:3000 opens on the first dashboard. All three are in 
 - **A dashboard panel says "No data"**: mds or InfluxDB just started (wait 10 to 20 seconds), or,
   for the mds panels, `MDS_PROMETHEUS_ENABLED` isn't `true` in `config/docker.env`. Prometheus shows
   each target's state at http://localhost:9091/targets.
-- **Your code changes don't show up**: rebuild the image (step 1, or `scripts/dev.sh docker --build`),
-  then run step 2 again.
+- **Your code changes don't show up**: build the jar again (step 1), then run step 2; or
+  `scripts/dev.sh docker`, which does both.
 - **The first `up` after updating this repository recreates the InfluxDB container** (when its
   network changed). The data is kept in the `influxdb-data` volume.
 
@@ -290,7 +301,7 @@ Or build a jar and run it with any Java 21+ runtime:
 
 ```bash
 ./gradlew bootJar
-java -jar build/libs/mds-0.0.1-SNAPSHOT.jar
+java -jar build/libs/mds.jar
 ```
 
 ### Troubleshooting
@@ -907,9 +918,8 @@ requests), so reconnects go to the quieter instances; no session stickiness is n
 ```bash
 scripts/dev.sh infra
 ./gradlew bootJar
-JAR=$(ls build/libs/mds-*.jar | grep -v plain)
-java -jar "$JAR" --mds.cluster.members=127.0.0.1 &
-java -jar "$JAR" --mds.cluster.members=127.0.0.1 --server.port=8081 &
+java -jar build/libs/mds.jar --mds.cluster.members=127.0.0.1 &
+java -jar build/libs/mds.jar --mds.cluster.members=127.0.0.1 --server.port=8081 &
 curl -s localhost:8081/actuator/health    # components.cluster: members 2, ownedPairs
 ```
 
@@ -1292,7 +1302,7 @@ subscribers, for the per-subscriber path):
 ```bash
 ./gradlew bootJar
 java -XX:StartFlightRecording=delay=60s,duration=5m,filename=build/mds.jfr \
-    -jar "$(ls build/libs/mds-*.jar | grep -v plain)" --mds.instance=agent
+    -jar build/libs/mds.jar --mds.instance=agent
 jfr view allocation-by-class build/mds.jfr   # jfr is in the JDK's bin directory
 jfr view hot-methods build/mds.jfr           # or open the file in JDK Mission Control
 ```

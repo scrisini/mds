@@ -72,6 +72,11 @@ dependencies {
     testRuntimeOnly("org.junit.platform:junit-platform-launcher")
 }
 
+// A fixed name, so the Dockerfile can copy it whatever the version
+tasks.bootJar {
+    archiveFileName.set("mds.jar")
+}
+
 tasks.withType<Test> {
     useJUnitPlatform()
 }
