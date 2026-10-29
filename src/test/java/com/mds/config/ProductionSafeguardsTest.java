@@ -15,14 +15,16 @@ import org.springframework.mock.env.MockEnvironment;
 class ProductionSafeguardsTest {
 
     /** Everything production mode asks for. */
-    private static final Map<String, String> SAFE = Map.of(
-            "mds.mode", "production",
-            "mds.ssm.path", "/mds/prod/",
-            "mds.vault.address", "https://vault.internal:8200",
-            "mds.influx.token", "from-vault",
-            "logging.structured.format.console", "ecs",
-            "mds.stream.allowed-origins", "https://app.example.com",
-            "mds.stream.allow-unthrottled", "false");
+    private static final Map<String, String> SAFE = Map.ofEntries(
+            Map.entry("mds.mode", "production"),
+            Map.entry("mds.ssm.path", "/mds/prod/"),
+            Map.entry("mds.vault.address", "https://vault.internal:8200"),
+            Map.entry("mds.influx.token", "from-vault"),
+            Map.entry("logging.structured.format.console", "ecs"),
+            Map.entry("mds.stream.allowed-origins", "https://app.example.com"),
+            Map.entry("mds.stream.allow-unthrottled", "false"),
+            Map.entry("springdoc.api-docs.enabled", "false"),
+            Map.entry("springdoc.swagger-ui.enabled", "false"));
 
     @Test
     void developmentModeAllowsLocalDefaults() {
@@ -40,13 +42,25 @@ class ProductionSafeguardsTest {
                 "mds.mode", "PRODUCTION",
                 "mds.influx.token", "mds-dev-token")));
 
-        assertThat(violations).hasSize(6).anySatisfy(v -> assertThat(v).startsWith("mds.ssm.path"))
+        assertThat(violations).hasSize(7).anySatisfy(v -> assertThat(v).startsWith("mds.ssm.path"))
                 .anySatisfy(v -> assertThat(v).startsWith("mds.vault.address"))
                 .anySatisfy(v -> assertThat(v).startsWith("mds.influx.token"))
                 .anySatisfy(v -> assertThat(v).contains("MDS_LOG_FORMAT=ecs"))
                 .anySatisfy(v -> assertThat(v).startsWith("mds.stream.allowed-origins"))
-                .anySatisfy(v -> assertThat(v).startsWith("mds.stream.allow-unthrottled"));
+                .anySatisfy(v -> assertThat(v).startsWith("mds.stream.allow-unthrottled"))
+                .anySatisfy(v -> assertThat(v).contains("MDS_API_DOCS_ENABLED=false"));
         assertThat(String.join(" ", violations)).doesNotContain("mds-dev-token");
+    }
+
+    @Test
+    void productionModeRefusesTheApiDocsOrSwaggerUi() {
+        for (String key : List.of("springdoc.api-docs.enabled", "springdoc.swagger-ui.enabled")) {
+            Map<String, String> settings = new HashMap<>(SAFE);
+            settings.put(key, "true");
+
+            assertThat(ProductionSafeguards.violations(binder(settings))).as(key)
+                    .singleElement().asString().startsWith("springdoc.api-docs.enabled");
+        }
     }
 
     @Test

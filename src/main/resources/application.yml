@@ -131,6 +131,22 @@ mds:
     org: ${MDS_INFLUX_ORG:mds}
     bucket: ${MDS_INFLUX_BUCKET:prices}
 
+# OpenAPI description of the REST API at /v3/api-docs and Swagger UI at /swagger-ui.html (README
+# "API documentation"). On by default; production mode refuses it, so deployments set
+# MDS_API_DOCS_ENABLED=false. The WebSocket and gRPC APIs aren't described here.
+springdoc:
+  api-docs:
+    enabled: ${MDS_API_DOCS_ENABLED:true}
+  swagger-ui:
+    enabled: ${MDS_API_DOCS_ENABLED:true}
+    # no request to swagger.io's online validator from the browser
+    validator-url: none
+    # groups and their endpoints in a fixed order rather than the order controllers load in
+    tags-sorter: alpha
+    operations-sorter: alpha
+  paths-to-match: /api/**
+  default-produces-media-type: application/json
+
 management:
   endpoints:
     web:

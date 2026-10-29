@@ -15,6 +15,7 @@ EKS behind an ALB), see [`docs/deployment.md`](docs/deployment.md).
 | Exchange streams | Streams tickers from Binance, Kraken, Bitstamp, KuCoin and Bitfinex over WebSocket, and reconnects by itself | [Configuration](#configuration) |
 | Aggregated prices | Mean, median, VWAP, min, max and best bid/ask per pair across the exchanges, leaving out stale quotes | [REST API](#rest-api) |
 | Real-time streams | Server-Sent Events, and a WebSocket carrying several pairs, each at its own rate (1 to 10 per second, or every change) | [Real-time subscriptions](#real-time-subscriptions-rates) |
+| API documentation | An OpenAPI description of the REST API and Swagger UI to read and try it in a browser, at http://localhost:8080/swagger-ui.html; off in production (`MDS_API_DOCS_ENABLED`) | [API documentation](#api-documentation-openapi) |
 | gRPC API | Prices and streams over gRPC (port 9090) in compact protobuf: 111 bytes per event against about 1,300 for SSE, with gzip where it pays | [gRPC API](#grpc-api) |
 | Stream heartbeats | An SSE comment line or WebSocket ping every 30 s, so load balancers don't close quiet streams (`MDS_STREAM_HEARTBEAT`) | [Timeouts](docs/deployment.md#timeouts) |
 | OHLC candles | Hour, day, week, month and year candles for the index and each exchange, kept across restarts | [OHLC candles](#ohlc-candles) |
@@ -85,6 +86,10 @@ curl localhost:8080/api/v1/prices/BTC-USDT              # live aggregate
 curl -N 'localhost:8080/api/v1/stream/prices/BTC-USDT?throttle=1s'
 ```
 
+To browse and try the REST API, open **http://localhost:8080/swagger-ui.html** (Swagger UI; the
+OpenAPI description is at http://localhost:8080/v3/api-docs, see
+[API documentation](#api-documentation-openapi)).
+
 Exchanges connect within a few seconds of startup; until a pair's first update arrives its
 endpoints return 503. The InfluxDB UI is at http://localhost:8086 (user `admin`, password
 `admin-password`, org `mds`, bucket `prices`).
@@ -152,6 +157,7 @@ mds starts once InfluxDB is healthy. Without `--profile app`, compose starts onl
 curl localhost:8080/actuator/health/readiness   # {"status":"UP"} after 10 to 20 seconds
 curl localhost:8080/api/v1/prices/BTC-USDT
 docker compose logs -f mds
+open http://localhost:8080/swagger-ui.html      # Swagger UI: browse and try the REST API
 open http://localhost:3000                      # Grafana: the dashboards, no login needed
 ```
 
@@ -317,6 +323,8 @@ java -jar build/libs/mds-0.0.1-SNAPSHOT.jar
 | WS | `/api/v1/ws/prices` | WebSocket: subscribe to several pairs, each at its own rate |
 | GET | `/api/v1/candles/{pair}?period=day&source=index` | Stored OHLC candles (`hour`, `day`, `week`, `month`, `year`), oldest first |
 | GET | `/api/v1/candles/{pair}/current?source=index` | Live in-progress candles for every period |
+| GET | `/swagger-ui.html` | Swagger UI: browse and try the REST API in a browser ([API documentation](#api-documentation-openapi)) |
+| GET | `/v3/api-docs` | OpenAPI 3.1 description of the REST API (JSON; `/v3/api-docs.yaml` for YAML) |
 | GET | `/actuator/health` | Includes `influx` and `streams` (up while any exchange is connected) checks |
 
 History endpoints accept `from` / `to` (ISO-8601, default: last hour), `window` (`30s`, `5m`, `1h`, `1d`…
@@ -325,6 +333,30 @@ averages rows into buckets) and `limit` (default 1000, max 10000).
 Errors are RFC 9457 problem details. Every response has an `X-Request-Id` header (the caller's, if
 it sent a safe one, otherwise generated), and error bodies repeat it as `requestId`, so a caller
 can quote it to support (see [Logging and support](#logging-and-support)).
+
+### API documentation (OpenAPI)
+
+Open **http://localhost:8080/swagger-ui.html** in a browser for Swagger UI: every REST endpoint
+with its parameters, response models and examples. **Try it out** sends a real request to the
+instance and shows the response, its status and its `X-Request-Id`. The OpenAPI 3.1 description
+itself is at `/v3/api-docs` (JSON) and `/v3/api-docs.yaml`, for client generators and tools such as
+Postman.
+
+- **Generated from the code** by [springdoc-openapi](https://springdoc.org): paths and models from
+  the controllers and records, summaries and parameter descriptions from their `@Operation`,
+  `@Parameter` and `@Tag` annotations. Prices and volumes are described as numbers, as they're sent.
+- **Covers `/api/**` only.** The WebSocket API ([WebSocket](#websocket)), the gRPC API
+  ([gRPC API](#grpc-api)) and `/actuator` aren't in it.
+- **Server-Sent Events:** Swagger UI waits for a response to end, so a stream shows nothing; use
+  `curl -N` or an `EventSource` for `/api/v1/stream/prices/{pair}`.
+- **On by default, off in production.** `MDS_API_DOCS_ENABLED=false` turns off both paths (404).
+  [Production mode](#production-mode) refuses to start while they're on, because they let anyone
+  who reaches the instance browse and call the whole API; the files in `deploy/` set it.
+- Everything the UI needs is served by the instance (no CDN), and it doesn't contact swagger.io's
+  online validator, so it works offline and behind a proxy.
+
+When adding an endpoint, give it an `@Operation(summary = ...)`, and a `@Parameter(description =
+...)` for anything a caller can't guess from the name.
 
 ### Real-time subscriptions: rates
 
@@ -488,6 +520,7 @@ Deployed environments take their settings from AWS SSM Parameter Store and their
 | `mds.grpc.compression` | `MDS_GRPC_COMPRESSION` | `auto` (gzip only for responses with quotes), `gzip` or `none` |
 | `mds.stream.heartbeat` | `MDS_STREAM_HEARTBEAT` | `30s`: an SSE comment or WebSocket ping on every open stream; `0` turns it off. Must be shorter than the load balancer's idle timeout |
 | `mds.stream.allow-unthrottled` | `MDS_STREAM_ALLOW_UNTHROTTLED` | `true` (permits `rate=unlimited`) |
+| `springdoc.api-docs.enabled` / `springdoc.swagger-ui.enabled` | `MDS_API_DOCS_ENABLED` (both) | `true`: `/v3/api-docs` and `/swagger-ui.html` ([API documentation](#api-documentation-openapi)); production mode needs `false` |
 | `mds.stream.allowed-origins` | `MDS_STREAM_ALLOWED_ORIGINS` | `*` (browser origins for WebSocket) |
 | `mds.decimal.scale` / `.rounding` | `MDS_DECIMAL_SCALE` / `MDS_DECIMAL_ROUNDING` | `8` / `HALF_EVEN` |
 | `mds.ohlc.zone` / `.flush-interval` | `MDS_OHLC_ZONE` | `UTC` / `10s` |
@@ -653,6 +686,7 @@ settings that are fine on a laptop but unsafe in production, and names each one 
 | Text logs | `MDS_LOG_FORMAT=ecs` |
 | WebSocket connections from any browser origin | `MDS_STREAM_ALLOWED_ORIGINS=https://app.example.com,…` |
 | `rate=unlimited` allowed | `MDS_STREAM_ALLOW_UNTHROTTLED=false` |
+| The OpenAPI description and Swagger UI ([API documentation](#api-documentation-openapi)) | `MDS_API_DOCS_ENABLED=false` |
 
 The configuration check applies the same rules to the stored configuration, so a change that would
 break them is reported before a restart. Staging and test environments that need the development

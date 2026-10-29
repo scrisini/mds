@@ -31,6 +31,7 @@
         { "name": "MDS_VAULT_PATH", "value": "mds/prod" },
         { "name": "MDS_STREAM_ALLOWED_ORIGINS", "value": "https://app.example.com" },
         { "name": "MDS_STREAM_ALLOW_UNTHROTTLED", "value": "false" },
+        { "name": "MDS_API_DOCS_ENABLED", "value": "false" },
         { "name": "BPL_JAVA_NMT_ENABLED", "value": "false" },
         { "name": "JAVA_TOOL_OPTIONS", "value": "-XX:MaxDirectMemorySize=192m" }
       ],

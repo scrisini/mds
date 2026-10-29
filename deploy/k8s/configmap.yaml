@@ -21,6 +21,8 @@ data:
   MDS_VAULT_PATH: mds/prod
   MDS_STREAM_ALLOWED_ORIGINS: https://app.example.com   # CHANGE: sites whose pages open WebSockets
   MDS_STREAM_ALLOW_UNTHROTTLED: "false"
+  # No OpenAPI description or Swagger UI in production
+  MDS_API_DOCS_ENABLED: "false"
   # The image's launcher prints a native-memory report to stdout at exit; keep stdout JSON only
   BPL_JAVA_NMT_ENABLED: "false"
   # gRPC buffers outside the heap, up to 32 KB per stream while a client isn't reading; the image's
