@@ -245,7 +245,7 @@ Grafana on http://localhost:3000 opens on the first dashboard. All three are in 
 
 | Dashboard | Data source | Shows |
 |---|---|---|
-| **mds and InfluxDB health** | Prometheus | **Health:** whether each service is up, whether mds's stored configuration would let it restart, uptimes, cluster members. **mds:** heap, CPU, GC and threads; quotes received per exchange, writes to InfluxDB, HTTP requests, real-time subscribers, p99 latencies (README [Latency](#latency)) and InfluxDB call times. **InfluxDB:** memory, goroutines, write and query requests, points written, query duration, disk |
+| **mds and InfluxDB health** | Prometheus | **Health:** whether each service is up, whether mds's stored configuration would let it restart, uptimes, cluster members. **Exchanges:** each configured exchange's state now and over time, and the time since its last update. **mds:** heap, CPU, GC and threads; quotes received per exchange, writes to InfluxDB, HTTP requests, real-time subscribers, p99 latencies (README [Latency](#latency)) and InfluxDB call times. **InfluxDB:** memory, goroutines, write and query requests, points written, query duration, disk |
 | **Prices: BTC/USD and ETH/USD** | InfluxDB (Flux) | The latest last-trade price of each pair per exchange, and charts of it over time (`ticker` measurement, `last` field, as archived every `mds.archive.interval`) |
 | **Candles: hour, day, week, month and year** | InfluxDB (Flux) | [OHLC candles](#ohlc-candles) for every supported period of the pair and source picked at the top (`index` or an exchange): a candlestick chart per period over its default history range (48 hours, 30 days, 26 weeks, 24 months, 10 years), and a table of each period's current candle with `updates` and `complete` (`ohlc` measurement) |
 
@@ -310,8 +310,9 @@ java -jar build/libs/mds.jar
   it or use `SERVER_PORT`. Instances sharing an InfluxDB bucket must form one cluster (see
   [Running several instances](#running-several-instances)), or their OHLC candles overwrite each
   other.
-- **An exchange shows `connected: false` or is missing from `/api/v1/exchanges`**: the exchange
-  is unreachable or blocks your region; the log shows why. The others keep working.
+- **An exchange isn't `CONNECTED` in `/api/v1/exchanges`**: `DISCONNECTED` means it is
+  unreachable or blocks your region (the log shows why) and mds keeps retrying; `FAILED` gives the
+  `reason` and the log event to look up. The others keep working ([Exchange health](#exchange-health)).
 - **`InfluxDB did not become healthy`**: check `docker compose logs influxdb`. To start over with an
   empty database, run `scripts/dev.sh reset`.
 - **Wrong InfluxDB token**: the container's admin token is only set when its volume is first
@@ -322,7 +323,7 @@ java -jar build/libs/mds.jar
 
 | Method | Path | Description |
 |---|---|---|
-| GET | `/api/v1/exchanges` | Per exchange: WebSocket connected, subscribed pairs, last update time |
+| GET | `/api/v1/exchanges` | Every configured exchange: `state`, WebSocket connected, subscribed pairs, last update time, and why it `FAILED` ([Exchange health](#exchange-health)) |
 | GET | `/api/v1/pairs` | Subscribed pairs |
 | GET | `/api/v1/prices` | Live aggregate for each subscribed pair |
 | GET | `/api/v1/prices/{pair}` | Live aggregate for one pair (`BTC-USDT`) |
@@ -336,7 +337,7 @@ java -jar build/libs/mds.jar
 | GET | `/api/v1/candles/{pair}/current?source=index` | Live in-progress candles for every period |
 | GET | `/swagger-ui.html` | Swagger UI: browse and try the REST API in a browser ([API documentation](#api-documentation-openapi)) |
 | GET | `/v3/api-docs` | OpenAPI 3.1 description of the REST API (JSON; `/v3/api-docs.yaml` for YAML) |
-| GET | `/actuator/health` | Includes `influx` and `streams` (up while any exchange is connected) checks |
+| GET | `/actuator/health` | Includes `influx`, `cluster` and `streams` (up while any exchange is `CONNECTED`; its details give each exchange's state) checks |
 
 History endpoints accept `from` / `to` (ISO-8601, default: last hour), `window` (`30s`, `5m`, `1h`, `1d`…
 averages rows into buckets) and `limit` (default 1000, max 10000).
@@ -523,7 +524,7 @@ Deployed environments take their settings from AWS SSM Parameter Store and their
 | `mds.pairs` | `MDS_PAIRS` | `BTC/USDT,ETH/USDT,BTC/USD,ETH/USD` |
 | `mds.connection-timeout` | | `10s` for metadata HTTP calls while connecting |
 | `mds.reconnect-delay` | | `5s` before retrying a failed connection or stream |
-| `mds.stale-after` | | `60s`; older quotes are excluded from aggregates |
+| `mds.stale-after` | | `60s`; older quotes are excluded from aggregates, and an exchange with no update this long is `STALE` |
 | `mds.archive.enabled` / `.interval` | `MDS_ARCHIVE_INTERVAL` | `true` / `5s` |
 | `mds.stream.default-throttle` / `min-throttle` / `max-throttle` | | `1s` / `100ms` (caps `rate` at 10/s) / `60s` |
 | `mds.stream.timeout` / `max-subscribers` | | `30m` / `1000` |
@@ -566,6 +567,23 @@ entry in `SupportedExchange`.
   subscribed; unlisted ones simply never update.
 - `volume` is whatever each exchange's stream reports (mostly 24h base volume; KuCoin's is the last
   trade size), so VWAP is indicative.
+
+### Exchange health
+
+Every exchange in `mds.exchanges` has a `state`, shown per exchange in `/api/v1/exchanges`, in the
+details of the `streams` check at `/actuator/health`, as the `mds.exchange.state` gauge, and on the
+**mds and InfluxDB health** dashboard ([Dashboards](#dashboards)):
+
+| State | Gauge | Means | What happens |
+|---|---|---|---|
+| `CONNECTED` | 3 | WebSocket open, and an update arrived within `mds.stale-after` | Its quotes are in the aggregates |
+| `STALE` | 2 | WebSocket open, but nothing within `mds.stale-after` since the last update (or since it started) | Its quotes drop out of the aggregates; XChange and mds keep the subscription |
+| `DISCONNECTED` | 1 | WebSocket closed | Reconnected every `mds.reconnect-delay` |
+| `FAILED` | 0 | Not streaming and not retrying; `reason` names the log event (unsupported id, initialisation or start failed, none of the pairs listed, gave up) | Nothing until restart: see that event in `docs/runbook.md` |
+
+`streams` is `UP` while at least one exchange is `CONNECTED`, so one exchange failing doesn't make
+the instance unhealthy (aggregates use the rest); readiness doesn't include it. Alert per exchange
+on `mds.exchange.state < 3` for a few minutes instead.
 
 ## Configuration and secrets
 
@@ -979,6 +997,8 @@ become underscores, e.g. `mds_quotes_received_total`), which the [dashboards](#d
 | `mds.influx.query` | timer, p50/p95/p99 | `measurement`, `outcome` |
 | `mds.influx.query.rows` | distribution | `measurement` |
 | `mds.quotes.received` | counter | `exchange`: quote updates received; the input rate everything else scales with |
+| `mds.exchange.state` | gauge | `exchange`: each configured exchange's state: 3 `CONNECTED`, 2 `STALE`, 1 `DISCONNECTED`, 0 `FAILED` ([Exchange health](#exchange-health)) |
+| `mds.exchange.update.age` | gauge, seconds | `exchange`: time since its last ticker or trade; `NaN` before the first |
 | `mds.stream.subscribers` | gauge | `transport` (`sse`/`websocket`/`grpc`) |
 | `mds.stream.events` | counter | `pair`, `transport` |
 | `mds.stream.latency` | timer, p50/p95/p99 | `transport`: from receiving an exchange update to handing the event to the subscriber's connection ([Latency](#latency)) |
