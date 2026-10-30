@@ -55,6 +55,7 @@ mds:
   pairs: ${MDS_PAIRS:BTC/USDT,ETH/USDT,BTC/USD,ETH/USD}
   connection-timeout: 10s
   reconnect-delay: 5s
+  # quotes older than this leave the aggregates, and an exchange with no update this long is STALE
   stale-after: 60s
   archive:
     enabled: true
