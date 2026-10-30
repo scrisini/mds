@@ -1,23 +1,29 @@
 package com.mds.exchange;
 
 import java.net.Proxy;
+import java.time.Clock;
 import java.time.Duration;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.TreeSet;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 
 import com.mds.config.MdsProperties;
 import com.mds.logging.LogEvent;
+import com.mds.model.ExchangeState;
 import com.mds.model.ExchangeStatus;
 import com.mds.model.MarketPair;
 import com.mds.service.QuoteBook;
 import info.bitrich.xchangestream.core.ProductSubscription;
 import info.bitrich.xchangestream.core.StreamingExchange;
 import info.bitrich.xchangestream.core.StreamingMarketDataService;
+import io.micrometer.core.instrument.Gauge;
+import io.micrometer.core.instrument.MeterRegistry;
 import io.reactivex.rxjava3.core.Completable;
 import io.reactivex.rxjava3.core.Observable;
 import io.reactivex.rxjava3.disposables.CompositeDisposable;
@@ -44,13 +50,18 @@ import org.springframework.stereotype.Component;
  * <p>Failed connections and terminated streams are retried after
  * {@link MdsProperties#reconnectDelay()}; XChange additionally reconnects dropped sockets
  * and resubscribes their channels on its own. Exchanges that cannot be initialised at all
- * (unknown id, metadata download failure) are logged and left out.
+ * (unknown id, metadata download failure) are logged and left out, and reported as
+ * {@link ExchangeState#FAILED} by {@link #status()}.
+ *
+ * <p>Each configured exchange's state is the gauge {@code mds.exchange.state} (its
+ * {@link ExchangeState#level()}), and the time since its last update {@code mds.exchange.update.age}.
  */
 @Slf4j
 @Component
 public class MarketStreamManager implements SmartLifecycle {
 
-    private record Connection(StreamingExchange exchange, List<MarketPair> pairs) {
+    /** @param since when streaming was started; an exchange with no update yet is stale this long after */
+    private record Connection(StreamingExchange exchange, List<MarketPair> pairs, Instant since) {
     }
 
     /** See {@link #getPhase()}. */
@@ -58,14 +69,20 @@ public class MarketStreamManager implements SmartLifecycle {
 
     private final MdsProperties properties;
     private final QuoteBook quoteBook;
+    private final Clock clock;
+    private final MeterRegistry registry;
     private final Map<String, Connection> connections = new ConcurrentHashMap<>();
+    /** Why each configured exchange that isn't streaming, and won't retry, stopped. */
+    private final Map<String, String> failures = new ConcurrentHashMap<>();
     private final CompositeDisposable subscriptions = new CompositeDisposable();
     private volatile Map<MarketPair, List<String>> exchangesByPair = Map.of();
     private volatile boolean running;
 
-    public MarketStreamManager(MdsProperties properties, QuoteBook quoteBook) {
+    public MarketStreamManager(MdsProperties properties, QuoteBook quoteBook, Clock clock, MeterRegistry registry) {
         this.properties = properties;
         this.quoteBook = quoteBook;
+        this.clock = clock;
+        this.registry = registry;
     }
 
     @Override
@@ -76,8 +93,12 @@ public class MarketStreamManager implements SmartLifecycle {
         for (String id : properties.exchanges()) {
             SupportedExchange.fromId(id).ifPresentOrElse(
                     supported -> start(supported, pairs),
-                    () -> LogEvent.EXCHANGE_UNSUPPORTED.at(log).with("exchange", id)
-                            .with("supported", SupportedExchange.ids()).log());
+                    () -> {
+                        failures.put(id, "not a supported exchange id (MDS-1005)");
+                        LogEvent.EXCHANGE_UNSUPPORTED.at(log).with("exchange", id)
+                                .with("supported", SupportedExchange.ids()).log();
+                    });
+            registerGauges(id);
         }
         running = true;
     }
@@ -89,6 +110,7 @@ public class MarketStreamManager implements SmartLifecycle {
                 attach(supported.id(), exchange, listedPairs(supported.id(), exchange, pairs),
                         supported.lastPriceFromTrades());
             } catch (RuntimeException e) {
+                failures.put(supported.id(), "could not start streaming (MDS-3003)");
                 LogEvent.EXCHANGE_START_FAILED.at(log).with("exchange", supported.id()).cause(e).log();
             }
         });
@@ -121,10 +143,11 @@ public class MarketStreamManager implements SmartLifecycle {
     /** Connects and subscribes asynchronously; returns immediately. */
     synchronized void attach(String id, StreamingExchange exchange, List<MarketPair> pairs, boolean lastPriceFromTrades) {
         if (pairs.isEmpty()) {
+            failures.put(id, "lists none of the configured pairs (MDS-3004)");
             LogEvent.EXCHANGE_NO_CONFIGURED_PAIRS.at(log).with("exchange", id).log();
             return;
         }
-        connections.put(id, new Connection(exchange, pairs));
+        connections.put(id, new Connection(exchange, pairs, clock.instant()));
         exchangesByPair = indexByPair(connections);
 
         ProductSubscription products = products(pairs, lastPriceFromTrades);
@@ -134,7 +157,10 @@ public class MarketStreamManager implements SmartLifecycle {
                 .retryWhen(errors -> errors.delay(delay().toMillis(), TimeUnit.MILLISECONDS))
                 .subscribe(
                         () -> subscribe(id, exchange, pairs, lastPriceFromTrades),
-                        e -> LogEvent.EXCHANGE_GAVE_UP.at(log).with("exchange", id).cause(e).log()));
+                        e -> {
+                            failures.put(id, "stopped reconnecting (MDS-3007)");
+                            LogEvent.EXCHANGE_GAVE_UP.at(log).with("exchange", id).cause(e).log();
+                        }));
     }
 
     public List<String> ids() {
@@ -150,13 +176,55 @@ public class MarketStreamManager implements SmartLifecycle {
         return exchangesByPair.getOrDefault(pair, List.of());
     }
 
+    /** Every configured exchange, including those that failed to start, sorted by id. */
     public List<ExchangeStatus> status() {
-        return connections.entrySet().stream()
-                .sorted(Map.Entry.comparingByKey())
-                .map(e -> new ExchangeStatus(e.getKey(), isAlive(e.getValue().exchange()),
-                        e.getValue().pairs().stream().map(MarketPair::symbol).toList(),
-                        quoteBook.lastUpdate(e.getKey()).orElse(null)))
-                .toList();
+        Instant now = clock.instant();
+        TreeSet<String> configured = new TreeSet<>(connections.keySet());
+        configured.addAll(failures.keySet());
+        return configured.stream().map(id -> status(id, now)).toList();
+    }
+
+    private ExchangeStatus status(String id, Instant now) {
+        Connection connection = connections.get(id);
+        String failure = failures.get(id);
+        Instant lastUpdate = quoteBook.lastUpdate(id).orElse(null);
+        if (connection == null) {
+            return new ExchangeStatus(id, ExchangeState.FAILED, false, List.of(), lastUpdate, failure);
+        }
+        boolean connected = isAlive(connection.exchange());
+        return new ExchangeStatus(id, state(connection, connected, lastUpdate, failure, now), connected,
+                connection.pairs().stream().map(MarketPair::symbol).toList(), lastUpdate, failure);
+    }
+
+    private ExchangeState state(Connection connection, boolean connected, Instant lastUpdate, String failure,
+                                Instant now) {
+        if (failure != null) {
+            return ExchangeState.FAILED;
+        }
+        if (!connected) {
+            return ExchangeState.DISCONNECTED;
+        }
+        Instant latest = lastUpdate == null ? connection.since() : lastUpdate;
+        return latest.isBefore(now.minus(properties.staleAfter())) ? ExchangeState.STALE : ExchangeState.CONNECTED;
+    }
+
+    /** One pair of gauges per configured exchange, so the number of series is bounded by the configuration. */
+    private void registerGauges(String id) {
+        Gauge.builder("mds.exchange.state", this, m -> m.status(id, m.clock.instant()).state().level())
+                .description("Exchange health: 3 connected, 2 stale, 1 disconnected, 0 failed")
+                .tag("exchange", id)
+                .register(registry);
+        Gauge.builder("mds.exchange.update.age", this, m -> m.updateAge(id))
+                .description("Time since the exchange's last update; absent before the first")
+                .tag("exchange", id)
+                .baseUnit("seconds")
+                .register(registry);
+    }
+
+    private double updateAge(String id) {
+        return quoteBook.lastUpdate(id)
+                .map(last -> Duration.between(last, clock.instant()).toMillis() / 1000.0)
+                .orElse(Double.NaN);
     }
 
     // getTicker/getTrades(CurrencyPair) are deprecated in xchange-stream-core 6, but Kraken,
@@ -222,6 +290,7 @@ public class MarketStreamManager implements SmartLifecycle {
             exchange.applySpecification(spec);
             return Optional.of(exchange);
         } catch (RuntimeException e) {
+            failures.put(supported.id(), "could not initialise (MDS-3002)");
             LogEvent.EXCHANGE_INIT_FAILED.at(log).with("exchange", supported.id()).cause(e).log();
             return Optional.empty();
         }

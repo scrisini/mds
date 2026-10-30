@@ -8,6 +8,7 @@ import static org.mockito.Mockito.mock;
 
 import java.math.RoundingMode;
 import java.net.Proxy;
+import java.time.Clock;
 import java.time.Duration;
 import java.time.ZoneOffset;
 import java.util.List;
@@ -19,6 +20,7 @@ import com.mds.support.FakeSocks5Server;
 import com.mds.support.TestClusters;
 import info.bitrich.xchangestream.core.StreamingExchange;
 import info.bitrich.xchangestream.core.ProductSubscription;
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.EnumSource;
@@ -101,7 +103,8 @@ class SocksProxyTest {
 
     @Test
     void refusesToStartWhenRestCallsWouldNotUseSocks() {
-        MarketStreamManager manager = new MarketStreamManager(properties(PROXY), mock(QuoteBook.class));
+        MarketStreamManager manager = new MarketStreamManager(properties(PROXY), mock(QuoteBook.class), Clock.systemUTC(),
+                new SimpleMeterRegistry());
 
         assertThatIllegalStateException().isThrownBy(() -> manager.verifyProxySupport(Proxy.Type.HTTP))
                 .withMessageContaining("rescu.http.readProxyType=SOCKS");
@@ -111,7 +114,7 @@ class SocksProxyTest {
     @Test
     void noProxyNeedsNoSocksSupport() {
         MarketStreamManager manager = new MarketStreamManager(properties(new MdsProperties.SocksProxy(null, 1080)),
-                mock(QuoteBook.class));
+                mock(QuoteBook.class), Clock.systemUTC(), new SimpleMeterRegistry());
 
         assertThatNoException().isThrownBy(() -> manager.verifyProxySupport(Proxy.Type.HTTP));
     }

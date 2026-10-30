@@ -482,13 +482,299 @@
       ]
     },
     {
+      "id": 26,
+      "type": "row",
+      "title": "Exchanges",
+      "collapsed": false,
+      "gridPos": {
+        "x": 0,
+        "y": 5,
+        "w": 24,
+        "h": 1
+      },
+      "panels": []
+    },
+    {
+      "id": 27,
+      "type": "stat",
+      "title": "Exchange state",
+      "description": "Each configured exchange now (worst instance): CONNECTED (open, updates arriving), STALE (open, nothing within mds.stale-after), DISCONNECTED (reconnecting), FAILED (not streaming until restart; the reason is in /actuator/health and /api/v1/exchanges).",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "x": 0,
+        "y": 6,
+        "w": 8,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "FAILED",
+                  "color": "red",
+                  "index": 0
+                },
+                "1": {
+                  "text": "DISCONNECTED",
+                  "color": "orange",
+                  "index": 1
+                },
+                "2": {
+                  "text": "STALE",
+                  "color": "yellow",
+                  "index": 2
+                },
+                "3": {
+                  "text": "CONNECTED",
+                  "color": "green",
+                  "index": 3
+                }
+              }
+            },
+            {
+              "type": "special",
+              "options": {
+                "match": "null",
+                "result": {
+                  "text": "NO DATA",
+                  "color": "text",
+                  "index": 4
+                }
+              }
+            }
+          ],
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 1
+              },
+              {
+                "color": "yellow",
+                "value": 2
+              },
+              {
+                "color": "green",
+                "value": 3
+              }
+            ]
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "colorMode": "background",
+        "graphMode": "none",
+        "textMode": "value_and_name",
+        "orientation": "horizontal",
+        "justifyMode": "auto",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "refId": "A",
+          "expr": "min by (exchange) (mds_exchange_state{job=\"mds\"})",
+          "legendFormat": "{{exchange}}",
+          "range": true
+        }
+      ]
+    },
+    {
+      "id": 28,
+      "type": "state-timeline",
+      "title": "Exchange state over time",
+      "description": "State of each configured exchange (worst instance), from the mds.exchange.state gauge.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "x": 8,
+        "y": 6,
+        "w": 10,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "mappings": [
+            {
+              "type": "value",
+              "options": {
+                "0": {
+                  "text": "FAILED",
+                  "color": "red",
+                  "index": 0
+                },
+                "1": {
+                  "text": "DISCONNECTED",
+                  "color": "orange",
+                  "index": 1
+                },
+                "2": {
+                  "text": "STALE",
+                  "color": "yellow",
+                  "index": 2
+                },
+                "3": {
+                  "text": "CONNECTED",
+                  "color": "green",
+                  "index": 3
+                }
+              }
+            },
+            {
+              "type": "special",
+              "options": {
+                "match": "null",
+                "result": {
+                  "text": "NO DATA",
+                  "color": "text",
+                  "index": 4
+                }
+              }
+            }
+          ],
+          "color": {
+            "mode": "thresholds"
+          },
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "color": "red",
+                "value": null
+              },
+              {
+                "color": "orange",
+                "value": 1
+              },
+              {
+                "color": "yellow",
+                "value": 2
+              },
+              {
+                "color": "green",
+                "value": 3
+              }
+            ]
+          },
+          "custom": {
+            "fillOpacity": 80,
+            "lineWidth": 0
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "showValue": "never",
+        "mergeValues": true,
+        "rowHeight": 0.8,
+        "alignValue": "left",
+        "legend": {
+          "showLegend": false,
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "single",
+          "sort": "none"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "refId": "A",
+          "expr": "min by (exchange) (mds_exchange_state{job=\"mds\"})",
+          "legendFormat": "{{exchange}}",
+          "range": true
+        }
+      ]
+    },
+    {
+      "id": 29,
+      "type": "timeseries",
+      "title": "Time since last update",
+      "description": "Seconds since each exchange's last ticker or trade (worst instance). Above mds.stale-after (60 s by default) the exchange is STALE and left out of aggregates.",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "x": 18,
+        "y": 6,
+        "w": 6,
+        "h": 8
+      },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "min": 0,
+          "custom": {
+            "fillOpacity": 10,
+            "showPoints": "never",
+            "lineWidth": 1
+          }
+        },
+        "overrides": []
+      },
+      "options": {
+        "legend": {
+          "displayMode": "list",
+          "placement": "bottom"
+        },
+        "tooltip": {
+          "mode": "multi",
+          "sort": "desc"
+        }
+      },
+      "targets": [
+        {
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          },
+          "refId": "A",
+          "expr": "max by (exchange) (mds_exchange_update_age_seconds{job=\"mds\"})",
+          "legendFormat": "{{exchange}}",
+          "range": true
+        }
+      ]
+    },
+    {
       "id": 8,
       "type": "row",
       "title": "mds: JVM and system",
       "collapsed": false,
       "gridPos": {
         "x": 0,
-        "y": 5,
+        "y": 14,
         "w": 24,
         "h": 1
       },
@@ -505,7 +791,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 6,
+        "y": 15,
         "w": 8,
         "h": 8
       },
@@ -564,7 +850,7 @@
       },
       "gridPos": {
         "x": 8,
-        "y": 6,
+        "y": 15,
         "w": 8,
         "h": 8
       },
@@ -623,7 +909,7 @@
       },
       "gridPos": {
         "x": 16,
-        "y": 6,
+        "y": 15,
         "w": 8,
         "h": 8
       },
@@ -695,7 +981,7 @@
       "collapsed": false,
       "gridPos": {
         "x": 0,
-        "y": 14,
+        "y": 23,
         "w": 24,
         "h": 1
       },
@@ -712,7 +998,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 15,
+        "y": 24,
         "w": 8,
         "h": 8
       },
@@ -761,7 +1047,7 @@
       },
       "gridPos": {
         "x": 8,
-        "y": 15,
+        "y": 24,
         "w": 8,
         "h": 8
       },
@@ -820,7 +1106,7 @@
       },
       "gridPos": {
         "x": 16,
-        "y": 15,
+        "y": 24,
         "w": 8,
         "h": 8
       },
@@ -869,7 +1155,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 23,
+        "y": 32,
         "w": 8,
         "h": 8
       },
@@ -918,7 +1204,7 @@
       },
       "gridPos": {
         "x": 8,
-        "y": 23,
+        "y": 32,
         "w": 8,
         "h": 8
       },
@@ -987,7 +1273,7 @@
       },
       "gridPos": {
         "x": 16,
-        "y": 23,
+        "y": 32,
         "w": 8,
         "h": 8
       },
@@ -1042,7 +1328,7 @@
       "collapsed": false,
       "gridPos": {
         "x": 0,
-        "y": 31,
+        "y": 40,
         "w": 24,
         "h": 1
       },
@@ -1059,7 +1345,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 32,
+        "y": 41,
         "w": 8,
         "h": 8
       },
@@ -1118,7 +1404,7 @@
       },
       "gridPos": {
         "x": 8,
-        "y": 32,
+        "y": 41,
         "w": 8,
         "h": 8
       },
@@ -1167,7 +1453,7 @@
       },
       "gridPos": {
         "x": 16,
-        "y": 32,
+        "y": 41,
         "w": 8,
         "h": 8
       },
@@ -1216,7 +1502,7 @@
       },
       "gridPos": {
         "x": 0,
-        "y": 40,
+        "y": 49,
         "w": 8,
         "h": 8
       },
@@ -1285,7 +1571,7 @@
       },
       "gridPos": {
         "x": 8,
-        "y": 40,
+        "y": 49,
         "w": 8,
         "h": 8
       },
@@ -1344,7 +1630,7 @@
       },
       "gridPos": {
         "x": 16,
-        "y": 40,
+        "y": 49,
         "w": 8,
         "h": 8
       },

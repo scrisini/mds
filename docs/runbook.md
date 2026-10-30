@@ -42,10 +42,13 @@ Suggested alerts:
 - `MDS-1016`, or the `mds.config.restartable` gauge at 0 (the stored configuration would stop the
   next restart: fix it before deploying);
 - `mds.stream.queue` p99 above 100 ms, or `mds.candles.lag` p99 above 1 s, for 5 minutes
-  (subscribers or candles are falling behind: see README "Capacity" and add instances or cores).
+  (subscribers or candles are falling behind: see README "Capacity" and add instances or cores);
+- `mds.exchange.state` below 3 for an exchange for 5 minutes (it is stale, disconnected or failed:
+  `/api/v1/exchanges` gives its `state` and, when `FAILED`, the `reason` with the event to look up).
 
-Useful health checks: `GET /actuator/health` (InfluxDB and the cluster), `GET /api/v1/exchanges`
-(each exchange's connection state and last update).
+Useful health checks: `GET /actuator/health` (InfluxDB, the cluster, and each exchange's state
+under `streams`), `GET /api/v1/exchanges` (each configured exchange's state, connection, last
+update and failure reason).
 
 ## When to escalate to developers
 

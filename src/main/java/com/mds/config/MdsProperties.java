@@ -18,7 +18,8 @@ import org.springframework.boot.context.properties.bind.DefaultValue;
  * @param pairs             currency pairs subscribed on every exchange that lists them, e.g. {@code BTC/USDT}
  * @param connectionTimeout HTTP timeout for the metadata calls made while connecting to an exchange
  * @param reconnectDelay    wait before retrying a failed connection or a terminated stream
- * @param staleAfter        quotes older than this are left out of aggregates
+ * @param staleAfter        quotes older than this are left out of aggregates, and an exchange with no update
+ *                          this long is reported stale
  * @param archive           snapshot archiving settings
  * @param stream            client SSE subscription settings
  * @param decimal           precision of all prices and volumes
