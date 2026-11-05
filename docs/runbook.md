@@ -246,6 +246,40 @@ range, and the full log lines for that request id or code (including `error.stac
 - **Check:** a missing line means the gRPC port couldn't be bound (another process on it): the
   startup error says so.
 
+<a id="mds-1020"></a>
+### MDS-1020: Shutdown started
+
+- **Level:** INFO. Expected once whenever an instance stops: a deploy, a scale-in or a restart.
+- **Means:** the instance received SIGTERM. Readiness has turned down, scheduled jobs no longer
+  start, and requests, streams and running jobs are being finished (README "Graceful shutdown").
+- **Check:** nothing, normally. If [MDS-1021](#mds-1021) doesn't follow, the instance was killed
+  before it finished, usually by the orchestrator when the stop timeout ran out: find out which step
+  took so long from the lines in between, and compare with docs/deployment.md "Timeouts".
+
+<a id="mds-1021"></a>
+### MDS-1021: Shutdown finished
+
+- **Level:** INFO. Expected once after [MDS-1020](#mds-1020), as the instance's last line.
+- **Means:** every shutdown step ended and every resource is closed. `mds.took` is the time since
+  SIGTERM. A step that reached its limit ended early rather than holding up the exit: a scheduled
+  job interrupted after 15 s shows as [MDS-3102](#mds-3102), and queued candle updates as
+  [MDS-1022](#mds-1022).
+- **Check:** nothing, normally. If `mds.took` approaches the stop timeout (60 s on ECS, 75 s on EKS,
+  which includes the 20 s `preStop`), the next slow stop will be killed: look for what is slow,
+  usually InfluxDB or a cluster member that isn't responding.
+
+<a id="mds-1022"></a>
+### MDS-1022: Queued candle updates dropped at shutdown
+
+- **Level:** WARN. Not expected; rare when it happens.
+- **Means:** during shutdown, candle updates were still queued `mds.waited` after the exchange
+  connections closed. They are dropped and the final flush goes ahead, so candles of this instance's
+  pairs miss the last moments before it stopped. The next owner continues them from the stored
+  candles and live prices.
+- **Check:** `mds.candles.lag` before the shutdown, and whether the cluster or the member was slow
+  ([MDS-3203](#mds-3203)). If it repeats on every stop, candles are falling behind in normal
+  running too.
+
 ## Requests and business outcomes (2xxx)
 
 <a id="mds-2001"></a>

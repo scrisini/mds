@@ -44,6 +44,11 @@ class ClusterConfigTest {
         assertThat(kubernetes.getTcpIpConfig().isEnabled()).isFalse();
     }
 
+    @Test
+    void handingOverDataCannotOutlastTheContainersStopTimeout() {
+        assertThat(config(List.of(), "").getProperty("hazelcast.graceful.shutdown.max.wait")).isEqualTo("20");
+    }
+
     private static Config config(List<String> members, String kubernetesServiceDns) {
         return ClusterConfig.hazelcastConfig(new MdsProperties.Cluster("mds", 5701, members, kubernetesServiceDns,
                 REBALANCE), CandleSerializers.all());
