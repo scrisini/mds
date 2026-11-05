@@ -1,6 +1,7 @@
 package com.mds.service;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.awaitility.Awaitility.await;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.Mockito.doThrow;
@@ -15,6 +16,10 @@ import java.time.Instant;
 import java.time.ZoneOffset;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.function.Function;
 
 import com.hazelcast.core.HazelcastInstance;
 import com.mds.cluster.Cluster;
@@ -28,6 +33,7 @@ import com.mds.persistence.PriceRepository;
 import com.mds.support.MutableClock;
 import com.mds.support.TestClusters;
 import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
+import io.reactivex.rxjava3.core.Scheduler;
 import io.reactivex.rxjava3.schedulers.Schedulers;
 import org.junit.jupiter.api.AfterAll;
 import org.junit.jupiter.api.AfterEach;
@@ -50,6 +56,7 @@ class CandleServiceTest {
     private final QuoteBook book = new QuoteBook(clock, new SimpleMeterRegistry());
     private final PriceRepository repository = mock(PriceRepository.class);
     private final List<List<Candle>> written = new ArrayList<>();
+    private Function<Scheduler, CandleService> serviceOn;
     private CandleService service;
 
     @BeforeAll
@@ -79,7 +86,9 @@ class CandleServiceTest {
         when(streams.exchangesFor(BTC_USD)).thenReturn(List.of("bitstamp", "kraken"));
         PriceService prices = new PriceService(streams, book, new PriceAggregator(), properties, clock);
         Cluster cluster = new Cluster(member, properties, new SimpleMeterRegistry());
-        service = new CandleService(book, prices, repository, cluster, properties, clock, registry, Schedulers.trampoline());
+        serviceOn = scheduler -> new CandleService(book, prices, repository, cluster, properties, clock, registry,
+                scheduler);
+        service = serviceOn.apply(Schedulers.trampoline());
         when(repository.findLatestCandles(any(), any())).thenReturn(List.of());
         org.mockito.Mockito.doAnswer(inv -> written.add(List.copyOf(inv.getArgument(0))))
                 .when(repository).saveCandles(anyList());
@@ -358,6 +367,49 @@ class CandleServiceTest {
         service.stop();
 
         assertThat(lastBatch()).extracting(Candle::source).contains("kraken", CandleService.INDEX);
+    }
+
+    @Test
+    void appliesQueuedUpdatesBeforeTheFinalFlush() throws Exception {
+        ExecutorService updates = Executors.newSingleThreadExecutor();
+        CountDownLatch busy = new CountDownLatch(1);
+        updates.execute(() -> awaitQuietly(busy));
+        service = serviceOn.apply(Schedulers.from(updates));
+        service.start();
+        trade("kraken", "100");
+
+        Thread stopping = new Thread(service::stop);
+        stopping.start();
+        await().until(() -> stopping.getState() == Thread.State.TIMED_WAITING);
+        busy.countDown();
+        stopping.join(Duration.ofSeconds(10));
+
+        assertThat(stopping.isAlive()).isFalse();
+        assertThat(lastBatch()).extracting(Candle::source).contains("kraken", CandleService.INDEX);
+        updates.shutdownNow();
+    }
+
+    @Test
+    void stopsEvenIfQueuedUpdatesNeverFinish() {
+        ExecutorService updates = Executors.newSingleThreadExecutor();
+        CountDownLatch stuck = new CountDownLatch(1);
+        updates.execute(() -> awaitQuietly(stuck));
+        service = serviceOn.apply(Schedulers.from(updates));
+        service.start();
+        trade("kraken", "100");
+
+        service.stop();
+
+        assertThat(service.isRunning()).isFalse();
+        updates.shutdownNow();
+    }
+
+    private static void awaitQuietly(CountDownLatch latch) {
+        try {
+            latch.await();
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
     }
 
     private static void assertFlat(Candle candle, String price) {

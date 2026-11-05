@@ -24,7 +24,7 @@ EKS behind an ALB), see [`docs/deployment.md`](docs/deployment.md).
 | **High availability** | | |
 | Clustering | Instances form an embedded Hazelcast cluster: each pair is owned by one instance, and candles live in the cluster with a backup, so losing an instance loses no candles | [Running several instances](#running-several-instances) |
 | Subscriber balancing | An instance with more than its fair share of streams moves its newest clients to the others | [Spreading subscribers](#running-several-instances) |
-| Graceful shutdown | On SIGTERM, streams close first with a signal to reconnect (`MDS-1014`), so clients move to another instance at once | [Stopping an instance](docs/deployment.md#stopping-an-instance) |
+| Graceful shutdown | On SIGTERM, streams close first with a signal to reconnect (`MDS-1014`), then in-flight requests, gRPC calls, scheduled jobs and queued candle updates finish and every resource closes, within limits, before the process exits (`MDS-1021`) | [Graceful shutdown](#graceful-shutdown) |
 | AWS deployment | ECS on Fargate or EKS behind an ALB, with ready-made files in `deploy/`, timeouts aligned to the web server, and health probes | [`docs/deployment.md`](docs/deployment.md) |
 | **Configuration and security** | | |
 | Parameter Store and Vault | Settings from AWS SSM Parameter Store and secrets from HashiCorp Vault, read at startup; the instance refuses to start if either can't be read | [Configuration and secrets](#configuration-and-secrets) |
@@ -922,7 +922,7 @@ requests), so reconnects go to the quieter instances; no session stickiness is n
 - **Rolling deploys** work: instances leave and join one at a time, and their pairs move with their
   candles. Stop instances gracefully (SIGTERM): the instance first closes its SSE and WebSocket
   streams, so clients reconnect elsewhere at once ([MDS-1014](docs/runbook.md#mds-1014)), and hands
-  its data over before it exits. Load balancer settings, timeouts and ready-made ECS and Kubernetes
+  its data over before it exits ([Graceful shutdown](#graceful-shutdown)). Load balancer settings, timeouts and ready-made ECS and Kubernetes
   files: [`docs/deployment.md`](docs/deployment.md).
 - **`mds.decimal.*` and `mds.ohlc.zone` must match on every instance**, because the shared candles
   depend on them. An instance that disagrees with the running cluster refuses to start
@@ -942,6 +942,42 @@ curl -s localhost:8081/actuator/health    # components.cluster: members 2, owned
 ```
 
 Without a port, each instance tries 5701 and the next two, and listens on the first free one.
+
+## Graceful shutdown
+
+On SIGTERM (`docker stop`, a deploy, a scale-in) Spring Boot closes the application context from its
+JVM shutdown hook. In-flight work finishes and every resource closes before the process exits, in
+this order:
+
+| # | Step | Spring Boot support used | Limit |
+|---|---|---|---|
+| 1 | Readiness turns down and scheduled jobs stop firing ([MDS-1020](docs/runbook.md#mds-1020)) | Context closed event | |
+| 2 | Real-time streams close and clients reconnect elsewhere ([MDS-1014](docs/runbook.md#mds-1014)); the gRPC server finishes its calls | `SmartLifecycle`, `spring.grpc.server.shutdown.grace-period` | 30 s |
+| 3 | Exchange connections close | `SmartLifecycle` | 5 s per exchange |
+| 4 | Candle updates already received are applied ([MDS-1022](docs/runbook.md#mds-1022) if not), then the final candle flush | `SmartLifecycle` | 5 s, then a 10 s InfluxDB write |
+| 5 | Tomcat stops accepting requests and finishes those in flight | `server.shutdown: graceful`, `spring.lifecycle.timeout-per-shutdown-phase` | 30 s |
+| 6 | Scheduled jobs still running finish, or are interrupted at the limit: the price archive, rebalancing, the configuration check | `spring.task.scheduling.shutdown.await-termination-period` | 15 s |
+| 7 | Stream threads, the InfluxDB client and the Hazelcast member close; the member hands its data to the others first | Bean `destroyMethod`s, `hazelcast.graceful.shutdown.max.wait` | 20 s |
+| 8 | [MDS-1021](docs/runbook.md#mds-1021) logs the time taken, and the process exits | Spring Boot shutdown handlers | |
+
+- **Exit code:** a JVM stopped by SIGTERM exits with 143. Spring Boot doesn't change that, so 143
+  after `MDS-1021` is a clean stop.
+- **Time:** the limits apply step by step and add up only if every step gets stuck. A normal stop
+  takes seconds. The container's stop timeout (60 s on ECS and in `docker-compose.yml`, 75 s on EKS)
+  must be longer than a normal stop; see [Timeouts](docs/deployment.md#timeouts).
+- **Measured:** with a stand-in InfluxDB that held archive writes open for 9 s, an instance given
+  SIGTERM finished all of them and exited after 9.3 s. Without step 6 it exited after 5 s and
+  abandoned them. With an InfluxDB that never answered, the client's 10 s timeout ended the writes
+  and the instance exited after 10.2 s.
+- **SIGKILL** can't be handled: nothing here runs. `MDS-1020` with no `MDS-1021` shows that an
+  instance was killed part-way through. Candles survive it through their cluster backup, losing at
+  most one flush interval ([MDS-3202](docs/runbook.md#mds-3202)).
+- **Adding something:** a new `@Scheduled` job gets step 6 for free, and must finish within its
+  limit. A new resource needs a `destroyMethod` that can't block without limit, because bean
+  destruction isn't covered by `timeout-per-shutdown-phase`.
+
+How it looks from outside, with the load balancer: [Stopping an
+instance](docs/deployment.md#stopping-an-instance).
 
 ## Decimal precision
 

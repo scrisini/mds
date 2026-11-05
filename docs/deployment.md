@@ -183,6 +183,10 @@ preStop sleep (20 s, EKS)  <  deregistration delay (30 s)
 SIGTERM to exit (about 12 s measured)  <  shutdown phase limit (30 s)  <  stop timeout (60 s ECS, 75 s EKS)
 ```
 
+Shutdown limits apply step by step ([Graceful shutdown](../README.md#graceful-shutdown)), so they add
+up only if every step gets stuck. An instance that does run out of stop timeout is killed, which
+shows as [MDS-1020](runbook.md#mds-1020) with no [MDS-1021](runbook.md#mds-1021).
+
 | Setting | Where | Value | Why |
 |---|---|---|---|
 | **Stream heartbeat** | `mds.stream.heartbeat` (`MDS_STREAM_HEARTBEAT`) | **30 s** | Every open stream gets an SSE comment or a WebSocket ping this often, whether or not prices are flowing, so no stream is ever silent for longer |
@@ -192,6 +196,8 @@ SIGTERM to exit (about 12 s measured)  <  shutdown phase limit (30 s)  <  stop t
 | **Deregistration delay** | target group | **30 s** | How long a stopping instance keeps its open connections after the ALB stops sending it new ones |
 | **preStop sleep** | EKS pod spec | **20 s** | Kubernetes sends SIGTERM straight away, while the ALB may still route to the pod for a few seconds. Sleeping first keeps the pod serving until the ALB has stopped. ECS doesn't need it: it waits for the deregistration delay before sending SIGTERM |
 | **Shutdown phase limit** | `spring.lifecycle.timeout-per-shutdown-phase` | 30 s | Upper limit for each shutdown step (finishing in-flight requests, disconnecting exchanges, writing candles) |
+| **Running job limit** | `spring.task.scheduling.shutdown.await-termination-period` | 15 s | How long a scheduled job running at SIGTERM (usually a price archive) may finish. Longer than the InfluxDB client's 10 s timeout, so a write ends by itself rather than being interrupted. Beyond the phase limit above |
+| **Cluster hand-over limit** | `hazelcast.graceful.shutdown.max.wait` (`ClusterConfig`) | 20 s | How long the member hands its data to the others before leaving anyway, when the backups take over. Hazelcast's 600 s default would outlast every stop timeout. Beyond the phase limit above |
 | **Stop timeout** | ECS `stopTimeout`; EKS `terminationGracePeriodSeconds` | **60 s; 75 s** | After this the container is killed. Measured: about 12 s from SIGTERM to exit. EKS adds the 20 s `preStop` |
 | **Health check grace** | ECS `healthCheckGracePeriodSeconds`; EKS startup probe | 60 s; up to 3 min | mds is ready about 10 s after its container starts (measured on a laptop), longer on a cold Fargate task |
 
@@ -234,8 +240,9 @@ On EKS, `deploy/k8s/ingress-grpc.yaml` creates it on the same ALB (IngressGroup 
 
 Deploys, scale-in and node maintenance stop instances one at a time. On SIGTERM mds closes every
 real-time stream first ([MDS-1014](runbook.md#mds-1014)), so clients reconnect to another instance
-while prices are still flowing. Then it disconnects from the exchanges, writes its candles and
-hands its share of the cluster to the others.
+while prices are still flowing. Then it disconnects from the exchanges, writes its candles, finishes
+in-flight requests and scheduled jobs, and hands its share of the cluster to the others. Every step
+and its limit: [Graceful shutdown](../README.md#graceful-shutdown).
 
 ```mermaid
 sequenceDiagram
@@ -252,13 +259,13 @@ sequenceDiagram
     else ECS
         Note over O,M: ECS waits for the deregistration delay (30 s)
     end
-    O->>M: SIGTERM
+    O->>M: SIGTERM (MDS-1020)
     M->>C: SSE "reconnect" event / WebSocket close 1013 (MDS-1014)
     C->>A: reconnect
     A->>R: route to a healthy instance
-    M->>M: finish in-flight requests, disconnect exchanges, write candles
+    M->>M: disconnect exchanges, write candles, finish in-flight requests and scheduled jobs
     M->>R: hand over its candles (Hazelcast)
-    M-->>O: exits (about 12 s after SIGTERM)
+    M-->>O: exits (MDS-1021, about 12 s after SIGTERM)
 ```
 
 ## Option A: ECS on Fargate

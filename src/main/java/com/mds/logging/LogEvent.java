@@ -59,6 +59,12 @@ public enum LogEvent {
             "Parameters or secrets changed since startup; they take effect when the instance restarts"),
     GRPC_SERVER_STARTED("MDS-1019", Level.INFO,
             "gRPC server listening for the MarketData API"),
+    SHUTDOWN_STARTED("MDS-1020", Level.INFO,
+            "Shutting down: no new scheduled jobs; requests, streams and running jobs are being finished"),
+    SHUTDOWN_COMPLETE("MDS-1021", Level.INFO,
+            "Shutdown finished: in-flight work has ended and every resource is closed; the process exits now"),
+    SHUTDOWN_CANDLE_UPDATES_UNFINISHED("MDS-1022", Level.WARN,
+            "Shutting down: candle updates still queued after the wait are dropped; the final flush goes ahead"),
 
     CANDLES_COMPLETED("MDS-2001", Level.INFO,
             "Candles for ended periods completed and written"),

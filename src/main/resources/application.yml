@@ -13,9 +13,17 @@ spring:
     virtual:
       enabled: true
   lifecycle:
-    # Each shutdown phase (web server, then exchange streams, then candles) waits at most this long. The
-    # container's stop timeout must cover it; see docs/deployment.md "Timeouts".
+    # Each shutdown phase (streams and gRPC, exchanges, candles, then the web server) waits at most this
+    # long. The container's stop timeout must cover it; see README "Graceful shutdown".
     timeout-per-shutdown-phase: 30s
+  task:
+    scheduling:
+      shutdown:
+        # A scheduled job running at SIGTERM finishes before the InfluxDB client and the cluster close.
+        # Off by default: without it Spring doesn't wait for fixed-rate and cron jobs at all.
+        await-termination: true
+        # Then it's interrupted. Longer than an InfluxDB write's 10s timeout.
+        await-termination-period: 15s
 
   grpc:
     server:

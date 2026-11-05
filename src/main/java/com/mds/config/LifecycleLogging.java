@@ -1,8 +1,14 @@
 package com.mds.config;
 
+import java.time.Clock;
+import java.time.Duration;
+import java.time.Instant;
+
 import com.mds.logging.LogEvent;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.boot.SpringApplication;
 import org.springframework.boot.context.event.ApplicationReadyEvent;
+import org.springframework.context.event.ContextClosedEvent;
 import org.springframework.core.env.ConfigurableEnvironment;
 import org.springframework.core.env.EnumerablePropertySource;
 import org.springframework.core.env.PropertySource;
@@ -10,15 +16,21 @@ import org.springframework.context.event.EventListener;
 import org.springframework.grpc.server.lifecycle.GrpcServerStartedEvent;
 import org.springframework.stereotype.Component;
 
-/** Logs lifecycle events from the catalogue, so support can see when an instance became ready. */
+/**
+ * Logs lifecycle events from the catalogue, so support can see when an instance became ready, and
+ * whether a stopping instance finished: a started shutdown with no end means it was killed.
+ */
 @Slf4j
 @Component
 class LifecycleLogging {
 
     private final MdsProperties properties;
+    private final Clock clock;
+    private volatile Instant shutdownStarted;
 
-    LifecycleLogging(MdsProperties properties) {
+    LifecycleLogging(MdsProperties properties, Clock clock) {
         this.properties = properties;
+        this.clock = clock;
     }
 
     @EventListener
@@ -27,11 +39,25 @@ class LifecycleLogging {
         logExternalConfiguration(environment);
         Integer port = environment.getProperty("local.server.port", Integer.class);
         LogEvent.SERVICE_STARTED.at(log).with("port", port).with("mode", properties.mode()).log();
+        // runs after the context has closed; no bean can run last, as beans close in no fixed order
+        SpringApplication.getShutdownHandlers().add(this::shutdownComplete);
     }
 
     @EventListener
     void grpcStarted(GrpcServerStartedEvent event) {
         LogEvent.GRPC_SERVER_STARTED.at(log).with("port", event.getPort()).log();
+    }
+
+    @EventListener(ContextClosedEvent.class)
+    void shutdownStarted() {
+        shutdownStarted = clock.instant();
+        LogEvent.SHUTDOWN_STARTED.at(log).log();
+    }
+
+    void shutdownComplete() {
+        if (shutdownStarted != null) {
+            LogEvent.SHUTDOWN_COMPLETE.at(log).with("took", Duration.between(shutdownStarted, clock.instant())).log();
+        }
     }
 
     /**
