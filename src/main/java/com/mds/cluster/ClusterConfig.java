@@ -44,6 +44,10 @@ public class ClusterConfig {
         config.setProperty("hazelcast.logging.type", "slf4j");
         // Spring shuts the member down after the final candle flush, not the JVM hook before it
         config.setProperty("hazelcast.shutdownhook.enabled", "false");
+        // handing data to the others may wait this long, not the default 600 s: beans close outside
+        // Spring's shutdown phase limit, so this must stay within the container's stop timeout. A
+        // member that gives up is treated as lost, and the backups take over.
+        config.setProperty("hazelcast.graceful.shutdown.max.wait", "20");
         // after a split (network trouble, members restarting at once) the halves both own every pair and
         // write the same candles until they merge: look for a merge after 30 s rather than the default 300 s
         config.setProperty("hazelcast.merge.first.run.delay.seconds", "30");

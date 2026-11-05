@@ -1,6 +1,7 @@
 package com.mds.service;
 
 import java.time.Clock;
+import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneId;
 import java.util.ArrayList;
@@ -10,6 +11,7 @@ import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Consumer;
 
@@ -31,6 +33,7 @@ import io.micrometer.core.instrument.Timer;
 import io.reactivex.rxjava3.core.Scheduler;
 import io.reactivex.rxjava3.disposables.Disposable;
 import io.reactivex.rxjava3.schedulers.Schedulers;
+import io.reactivex.rxjava3.subjects.CompletableSubject;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.context.SmartLifecycle;
@@ -84,6 +87,9 @@ public class CandleService implements SmartLifecycle {
 
     public static final String INDEX = "index";
 
+    /** How long {@link #stop()} waits for queued updates; normally the queue is all but empty. */
+    private static final Duration QUEUED_UPDATES_LIMIT = Duration.ofSeconds(5);
+
     private final QuoteBook quoteBook;
     private final PriceService priceService;
     private final PriceRepository repository;
@@ -98,6 +104,8 @@ public class CandleService implements SmartLifecycle {
     private final Set<MarketPair> pairs;
     private final Timer lag;
     private volatile Disposable subscription;
+    private volatile CompletableSubject stopping;
+    private volatile CountDownLatch updatesFinished;
     private volatile boolean updatesFailing;
 
     @Autowired
@@ -135,18 +143,36 @@ public class CandleService implements SmartLifecycle {
             closeRemovedPairs();
         }
         loadOwnedPairs();
-        subscription = quoteBook.updates().observeOn(updateScheduler).subscribe(this::onUpdate,
-                e -> LogEvent.CANDLE_UPDATES_STOPPED.at(log).cause(e).log());
+        stopping = CompletableSubject.create();
+        updatesFinished = new CountDownLatch(1);
+        subscription = quoteBook.updates()
+                .takeUntil(stopping.toObservable())
+                .observeOn(updateScheduler)
+                .doFinally(updatesFinished::countDown)
+                .subscribe(this::onUpdate, e -> LogEvent.CANDLE_UPDATES_STOPPED.at(log).cause(e).log());
         LogEvent.CANDLES_STARTED.at(log).with("zone", zone).log();
     }
 
     @Override
     public void stop() {
         if (subscription != null) {
+            finishQueuedUpdates();
             subscription.dispose();
             subscription = null;
         }
         flush();
+    }
+
+    /** Applies the updates already received, so the final flush includes them. No more can arrive by now. */
+    private void finishQueuedUpdates() {
+        stopping.onComplete();
+        try {
+            if (!updatesFinished.await(QUEUED_UPDATES_LIMIT.toMillis(), TimeUnit.MILLISECONDS)) {
+                LogEvent.SHUTDOWN_CANDLE_UPDATES_UNFINISHED.at(log).with("waited", QUEUED_UPDATES_LIMIT).log();
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
     }
 
     @Override

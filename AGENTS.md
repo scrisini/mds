@@ -190,6 +190,11 @@ com.mds
   (phases in that order, highest first). `CandleService` starts first and stops last, so it
   recovers before the first tick and flushes after the last; `PriceStreamService` stops first and
   closes every stream, so clients reconnect elsewhere before the exchanges disconnect.
+- **Graceful shutdown** (README "Graceful shutdown"): running `@Scheduled` jobs are waited for
+  through `spring.task.scheduling.shutdown`, when the scheduler bean closes, so it must close before
+  what jobs use (`ShutdownOrderTest`): don't inject `TaskScheduler` into a component. Bean destruction
+  has no overall limit (`timeout-per-shutdown-phase` covers lifecycles only), so a `destroyMethod`
+  must not block without one; the steps' limits must stay within the container's stop timeout.
 - **Two images.** `docker-compose.yml` builds mds from the `Dockerfile` (Temurin 21 JRE and
   `build/libs/mds.jar`, the fixed `bootJar` name), which needs nothing but the base image, so it
   builds on any Docker runtime and behind proxies. Production uses buildpacks (`bootBuildImage`).
